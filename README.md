@@ -80,10 +80,14 @@ texel 调用 Blender `ray_cast`。
 自动 framing。预设包括：
 
 - Auto 6：四个环绕视角 + 顶部 + 底部；
-- Auto 8：六个环绕视角 + 顶部 + 底部；
+- Auto 8：沿正方体 8 个顶点方向放置四个上方、四个下方的斜向视角；
 - Turntable 4：四个水平视角；
 - Counted Auto：按 Fibonacci sphere 均匀生成精确的 `Cam Count`；
 - Custom：使用场景中名为 `AIWearCam_*` 的相机。
+
+`Auto 8` 和 `Counted Auto, Cam Count=8` 不是同一组坐标。前者是严格中心对称的
+`normalize(±1, ±1, ±1)`，适合盒状道具；后者使用黄金角和等面积纬度近似均匀铺球，8 个
+Fibonacci 点不会恰好落在正方体顶点，但同样都是斜向视角，没有单独的纯顶部或纯底部图。
 
 每个相机生成构图、材质、背景和光照固定的 `clean_Vi.png`。AI 的任务不是重新设计物体，
 而是在相同图像坐标中加入磨损。

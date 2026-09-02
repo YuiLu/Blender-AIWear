@@ -82,6 +82,14 @@ def _fibonacci_dirs(n: int) -> List[Vector]:
     return out
 
 
+def _cube_corner_dirs() -> List[Vector]:
+    """Eight symmetric oblique directions through the corners of a cube."""
+    return [Vector((x, y, z)).normalized()
+            for z in (1.0, -1.0)
+            for y in (-1.0, 1.0)
+            for x in (-1.0, 1.0)]
+
+
 def generate_views(scene, obj, preset: str, count: int,
                    depsgraph=None) -> List["bpy.types.Object"]:
     import bpy
@@ -97,9 +105,11 @@ def generate_views(scene, obj, preset: str, count: int,
         dirs.append(Vector((0, 0, 1)))      # top
         dirs.append(Vector((0, 0, -1)))     # bottom
     elif preset == "AUTO_8":
-        dirs = _equator_dirs(6)
-        dirs.append(Vector((0, 0, 1)))
-        dirs.append(Vector((0, 0, -1)))
+        # Four upper and four lower oblique views.  For a box-like prop this
+        # observes three faces per image and avoids spending two requests on
+        # pure top/bottom views.  This is intentionally different from the
+        # arbitrary-count Fibonacci sampler below.
+        dirs = _cube_corner_dirs()
     elif preset == "TURNTABLE_4":
         dirs = _equator_dirs(4)
     elif preset == "AUTO_COUNT":
@@ -112,7 +122,6 @@ def generate_views(scene, obj, preset: str, count: int,
     else:
         dirs = _equator_dirs(max(3, count))
 
-    # Tilt equatorial views slightly to expose top edges
     cams: List["bpy.types.Object"] = []
     for i, d in enumerate(dirs):
         loc = center + d * dist

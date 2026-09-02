@@ -29,10 +29,10 @@ UV_MODE_ITEMS = (
 )
 
 CAMERA_PRESET_ITEMS = (
-    ("AUTO_6", "Auto 6 views", "6 coverage cameras around the model"),
-    ("AUTO_8", "Auto 8 views", "8 coverage cameras (denser top/bottom)"),
-    ("TURNTABLE_4", "Turntable 4", "4 equatorial views + 1 top (fast preview)"),
-    ("AUTO_COUNT", "Counted Auto", "Generate exactly Cam Count evenly distributed views"),
+    ("AUTO_6", "Auto 6 views", "4 equatorial cameras plus one top and one bottom camera"),
+    ("AUTO_8", "Auto 8 views", "8 symmetric oblique cameras along cube-corner directions"),
+    ("TURNTABLE_4", "Turntable 4", "4 equatorial views for a fast preview"),
+    ("AUTO_COUNT", "Counted Auto", "Generate exactly Cam Count approximately even Fibonacci-sphere views"),
     ("CUSTOM", "Custom", "Use the cameras currently marked in the scene"),
 )
 
