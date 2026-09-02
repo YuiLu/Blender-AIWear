@@ -283,6 +283,101 @@ def _save_uv_texture(path: str, rgba: np.ndarray, fmt: str) -> str:
     return utils.save_image(path, np.ascontiguousarray(rgba[::-1]), fmt)
 
 
+UV_SNAPSHOT_FILENAME = "AIWear_UVSnapshot.npz"
+
+
+def _save_uv_snapshot(obj, layer_name: str, path: str) -> str:
+    """Persist the exact per-loop Wear UV needed to replay cached projections.
+
+    A Mode-B UV layer lives in the .blend, but users commonly run the pipeline
+    and close/reopen an older unsaved copy. The cached views then outlive the
+    generated layer. Camera matrices alone are not sufficient for replay: the
+    exact UV coordinates are part of the cache contract too.
+    """
+    if obj is None or obj.type != "MESH":
+        raise RuntimeError("Cannot snapshot Wear UV: target is not a mesh.")
+    layer = obj.data.uv_layers.get(layer_name)
+    if layer is None:
+        raise RuntimeError(f"Cannot snapshot missing UV layer '{layer_name}'.")
+    uv = np.empty(len(layer.data) * 2, dtype=np.float32)
+    layer.data.foreach_get("uv", uv)
+    utils.ensure_dir(os.path.dirname(path))
+    np.savez_compressed(
+        path,
+        schema=np.asarray([1], dtype=np.int32),
+        layer=np.asarray([layer_name]),
+        uv=uv,
+        vertices=np.asarray([len(obj.data.vertices)], dtype=np.int64),
+        loops=np.asarray([len(obj.data.loops)], dtype=np.int64),
+        polygons=np.asarray([len(obj.data.polygons)], dtype=np.int64),
+    )
+    return path
+
+
+def _restore_uv_snapshot(obj, layer_name: str, path: str) -> dict:
+    """Restore a missing Wear UV from cache, with topology validation.
+
+    New caches contain an exact compressed per-loop snapshot. For legacy
+    caches, recovery is allowed only when the object has exactly one UV layer;
+    that conservative fallback matches projects where ``AI_WearUV`` was an
+    unsaved copy of the sole authored UV. Ambiguous multi-UV meshes fail loud
+    instead of silently sampling the wrong atlas.
+    """
+    if obj is None or obj.type != "MESH":
+        raise RuntimeError("Replay target is not a mesh.")
+    existing = obj.data.uv_layers.get(layer_name)
+    if existing is not None:
+        return {"restored": False, "method": "existing", "source": layer_name}
+
+    mesh = obj.data
+    uv = None
+    method = None
+    source_name = None
+    if os.path.isfile(path):
+        with np.load(path, allow_pickle=False) as data:
+            expected = (
+                int(data["vertices"][0]),
+                int(data["loops"][0]),
+                int(data["polygons"][0]),
+            )
+            actual = (len(mesh.vertices), len(mesh.loops), len(mesh.polygons))
+            if actual != expected:
+                raise RuntimeError(
+                    f"Replay: cached UV snapshot topology {expected} does not "
+                    f"match current mesh {actual}. Re-run the full pipeline.")
+            uv = np.asarray(data["uv"], dtype=np.float32).reshape(-1)
+        if uv.size != len(mesh.loops) * 2:
+            raise RuntimeError(
+                f"Replay: cached UV snapshot has {uv.size // 2} loops, current "
+                f"mesh has {len(mesh.loops)}. Re-run the full pipeline.")
+        method = "cached_snapshot"
+        source_name = os.path.basename(path)
+    else:
+        layers = list(mesh.uv_layers)
+        if len(layers) != 1:
+            names = [layer.name for layer in layers]
+            raise RuntimeError(
+                f"Replay: UV layer '{layer_name}' is missing and this legacy "
+                f"cache has no UV snapshot. Existing UV layers are {names}; "
+                f"automatic recovery is ambiguous. Re-run the full pipeline.")
+        source = layers[0]
+        uv = np.empty(len(source.data) * 2, dtype=np.float32)
+        source.data.foreach_get("uv", uv)
+        method = "legacy_single_uv_copy"
+        source_name = source.name
+
+    restored = mesh.uv_layers.new(name=layer_name, do_init=False)
+    if restored.name != layer_name:
+        mesh.uv_layers.remove(restored)
+        raise RuntimeError(
+            f"Replay could not recreate UV layer with exact name '{layer_name}'.")
+    restored.data.foreach_set("uv", uv)
+    mesh.uv_layers.active_index = list(mesh.uv_layers).index(restored)
+    restored.active_render = True
+    mesh.update()
+    return {"restored": True, "method": method, "source": source_name}
+
+
 def _step_preflight(snap, job, bridge):
     import bpy
     from ..uv import qc, unwrap_blender
@@ -412,6 +507,9 @@ def _run_pipeline(job, snap, bridge):
     cache_dir = job_cache.object_cache_dir(snap["obj_uuid"])
     out_dir = os.path.join(cache_dir, "views")
     utils.ensure_dir(out_dir)
+    uv_snapshot_path = os.path.join(cache_dir, UV_SNAPSHOT_FILENAME)
+    bridge.run(lambda: _save_uv_snapshot(
+        bpy.data.objects.get(obj_name), layer_name, uv_snapshot_path))
 
     # seed policy
     base_seed = snap["seed"] if (snap["seed"] and snap["lock_seed"]) else \
@@ -550,6 +648,7 @@ def _run_pipeline(job, snap, bridge):
             json.dump({"resolution": snap["render_resolution"],
                        "work_resolution": snap["work_resolution"],
                        "layer": layer_name, "object": obj_name,
+                       "uv_snapshot": UV_SNAPSHOT_FILENAME,
                        "views": view_records}, f, indent=2)
     except Exception:
         pass
@@ -725,6 +824,8 @@ def _run_replay(job, snap, bridge):
         raise RuntimeError("views.json has no views. Run the full pipeline once first.")
     layer_name = manifest.get("layer") or (snap["target_uv_layer"] or "AI_WearUV")
     res = int(manifest.get("work_resolution", snap["work_resolution"]))
+    uv_snapshot_path = os.path.join(
+        cache_dir, manifest.get("uv_snapshot") or UV_SNAPSHOT_FILENAME)
 
     # validate the cached images exist before doing any work
     missing = []
@@ -742,6 +843,14 @@ def _run_replay(job, snap, bridge):
 
     def _build_uv():
         obj = bpy.data.objects.get(obj_name)
+        restore = _restore_uv_snapshot(obj, layer_name, uv_snapshot_path)
+        if restore["restored"]:
+            _log_text(
+                f"[AI Wear] Replay restored missing UV layer '{layer_name}' "
+                f"via {restore['method']} from '{restore['source']}'.")
+            # Upgrade a legacy cache immediately so all later replays restore
+            # exact coordinates instead of relying on the single-UV fallback.
+            _save_uv_snapshot(obj, layer_name, uv_snapshot_path)
         uvf = build_uv_field(obj, layer_name, res,
                              depsgraph=bpy.context.evaluated_depsgraph_get())
         if uvf is None:
@@ -754,8 +863,9 @@ def _run_replay(job, snap, bridge):
             raise RuntimeError("Replay: " + _uv_empty_error_msg(obj_name, diag))
         _log_text(f"[AI Wear] Replay UV coverage {diag['coverage_pct']:.1f}% "
                   f"({diag['valid_count']}/{diag['total']} texels).")
-        return uvf, diag
-    uvfield, _udiag = bridge.run(_build_uv)
+        return uvf, diag, restore
+    uvfield, _udiag, uv_restore = bridge.run(_build_uv)
+    job.meta["uv_restore"] = uv_restore
     _check_cancel(job)
 
     res = uvfield.res
@@ -808,6 +918,7 @@ def _run_replay(job, snap, bridge):
     # Backfill the mask filenames into an older views.json when Replay is used
     # on caches created before per-view diff-mask persistence was added.
     manifest["views"] = view_records
+    manifest["uv_snapshot"] = UV_SNAPSHOT_FILENAME
     with open(views_json, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
 

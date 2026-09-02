@@ -198,6 +198,7 @@ Response Is URL     = ☑
 4. 完成后，插件为活动对象的全部材质槽创建对象私有预览副本，自动注入 `AIWearMask` 节点组，并用显式 `UV Map` 节点读取目标 Wear UV（不会修改共享给其他对象的原材质）。拖动 **Wear Amount** 0~100 与 **Feather** 实时预览，**不触发 AI、不重算 Surface Field**。
    每个离散视角的差值遮罩同时保存为 `views/diff_mask_V0.png`、`diff_mask_V1.png`…；文件为 16-bit RGB 灰度图，可直接查看，文件名也写入 `views.json` 的 `mask` 字段。
    `AIWear_WornTex.png` 的 RGB 保存受限的 clean→worn 残差，Alpha 保存经过对比度整形的真实磨损证据；它不是相机覆盖图。因此 100% 只显示 AI 检出的完整磨损范围，不会把整件模型变白。
+   完整管线还会在缓存根目录保存 `AIWear_UVSnapshot.npz`（精确的 per-loop Wear UV）。如果 `.blend` 没有保存 Mode-B 创建的 `AI_WearUV`，Replay 会先校验当前网格拓扑，再从快照自动恢复；旧缓存只有在模型恰好只有一个 UV 层时才执行一次保守复制，并立即升级生成快照。多 UV 情况不会猜测，以免静默映射到错误图集。
 5. **Export**：导出 WearTime（PNG16 / EXR / PNG8）、当前 Mask（按当前 Amount 固化）、或一键导出 30/60/100（验证单调性）。
 
 > 随时可点 **Cancel** 中断；失败时 Progress 面板会显示分类错误（API / NETWORK / CONFIG / CANCEL）与原始信息。
