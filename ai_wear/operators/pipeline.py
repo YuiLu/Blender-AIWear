@@ -125,6 +125,7 @@ def snapshot_context(context) -> dict:
         "camera_preset": s.camera_preset,
         "camera_count": s.camera_count,
         "render_resolution": s.render_resolution,
+        "view_context_mode": s.view_context_mode,
         "provider": s.effective_provider(prefs),
         "model": s.effective_model(prefs),
         "base_url": s.effective_base_url(prefs),
@@ -366,10 +367,23 @@ def _effective_weights(snap: dict) -> dict:
     return weights
 
 
+def _select_view_context(mode: str, supported: bool,
+                         first_anchor: str | None,
+                         previous_worn: str | None) -> str | None:
+    """Return the exact worn image attached to the next AI request."""
+    if not supported or mode == "NONE":
+        return None
+    if mode == "FIRST_ANCHOR":
+        return first_anchor
+    if mode == "PREVIOUS_VIEW":
+        return previous_worn
+    return None
+
+
 def _experiment_config(snap: dict, n_views: int, replayed: bool) -> dict:
     keys = (
         "uv_mode", "target_uv_layer", "work_resolution", "texture_size",
-        "camera_preset", "camera_count", "render_resolution", "provider",
+        "camera_preset", "camera_count", "render_resolution", "view_context_mode", "provider",
         "model", "strategy", "prompt", "seed", "lock_seed", "weights",
         "gamma", "alpha", "noise_amp", "noise_scale", "use_barrier",
         "mat_penalty", "coverage_target", "use_comfy_inpaint",
@@ -384,7 +398,7 @@ def _experiment_config(snap: dict, n_views: int, replayed: bool) -> dict:
     return cfg
 
 
-def _save_experiment_bundle(cache_dir: str, snap: dict, job, fmt: str,
+def _save_experiment_bundle(cache_dir: str, snap: dict, job,
                             n_views: int, ai_field: np.ndarray,
                             weartime_before: np.ndarray,
                             weartime_after: np.ndarray,
@@ -413,17 +427,22 @@ def _save_experiment_bundle(cache_dir: str, snap: dict, job, fmt: str,
         if os.path.isfile(src):
             shutil.copy2(src, os.path.join(exp_dir, name))
 
-    metrics = {}
-    for key, value in job.meta.items():
-        if isinstance(value, (str, int, float, bool)) or value is None:
-            metrics[key] = value
-    before = np.asarray(weartime_before, dtype=np.float32)
-    after = np.asarray(weartime_after, dtype=np.float32)
-    metrics.update({
-        "weartime_before_mean": float(before.mean()),
-        "weartime_after_mean": float(after.mean()),
-        "postprocess_mean_abs_delta": float(np.abs(after - before).mean()),
-    })
+    # Keep the experiment quantitative output deliberately small: these are
+    # visual production comparisons, not a metric-optimization benchmark.
+    import time
+    metrics = {"elapsed_seconds": float(time.time() - job.started)}
+
+    # Context/camera experiments need the actual per-view sequence, not only
+    # the final UV textures. Snapshot all reviewable view assets and manifest.
+    source_views = os.path.join(cache_dir, "views")
+    target_views = os.path.join(exp_dir, "views")
+    if os.path.isdir(source_views):
+        utils.ensure_dir(target_views)
+        prefixes = ("clean_V", "worn_V", "diff_mask_V", "inpaint_mask_V")
+        for entry in os.scandir(source_views):
+            if entry.is_file() and (entry.name == "views.json"
+                                    or entry.name.startswith(prefixes)):
+                shutil.copy2(entry.path, os.path.join(target_views, entry.name))
     with open(os.path.join(exp_dir, "config.json"), "w", encoding="utf-8") as f:
         json.dump(_experiment_config(snap, n_views, replayed), f,
                   ensure_ascii=False, indent=2)
@@ -667,7 +686,13 @@ def _run_pipeline(job, snap, bridge):
     seed = base_seed
 
     worn_paths: list[str] = []
-    anchor_path = None
+    first_anchor_path = None
+    previous_worn_path = None
+    context_mode = snap.get("view_context_mode", "FIRST_ANCHOR")
+    context_supported = bool(cap.supports_multi_turn_context
+                             and cap.max_reference_images > 1)
+    job.meta["view_context_mode"] = context_mode
+    job.meta["view_context_supported"] = context_supported
     # Per-view projection records, saved to views.json so the downstream
     # (mask → projection → fusion → WearTime → bake) can be replayed later
     # WITHOUT re-running AI: the replay reuses the exact camera matrices the
@@ -709,14 +734,25 @@ def _run_pipeline(job, snap, bridge):
         job.state = JobState.AI; job.stage = JobStage.AI_SUBMIT
         job.message = f"View {vi+1}/{n_views}: AI generating…"
         refs = []
-        if anchor_path and cap.max_reference_images >= 2:
-            refs = [anchor_path]
+        context_path = _select_view_context(
+            context_mode, context_supported,
+            first_anchor_path, previous_worn_path)
+        if context_path:
+            refs = [context_path]
+        view_prompt = snap["prompt"]
+        if refs:
+            view_prompt += (
+                " The first input image is the current clean target. The second "
+                "image is a previous worn-view style reference only: match its "
+                "wear material, color, scratch scale and severity, but preserve "
+                "the current target image's camera, silhouette and geometry.")
         req = GenRequest(
             clean_image_path=clean_png,
-            prompt=snap["prompt"],
+            prompt=view_prompt,
             seed=seed,
             output_size=snap["render_resolution"],
             reference_images=refs,
+            reference_labels=["context_worn"] if refs else [],
             mask_path=inpaint_mask_png,
             depth_path=None,
             normal_path=None,
@@ -743,8 +779,9 @@ def _run_pipeline(job, snap, bridge):
             shutil.copyfile(worn_png, worn_canon)
         except Exception:
             worn_canon = worn_png  # fall back to the provider's own path
-        if anchor_path is None:
-            anchor_path = worn_png
+        if first_anchor_path is None:
+            first_anchor_path = worn_canon
+        previous_worn_path = worn_canon
         if not snap["lock_seed"]:
             seed = int.from_bytes(os.urandom(4), "big")
 
@@ -769,6 +806,9 @@ def _run_pipeline(job, snap, bridge):
             "mask": os.path.basename(diff_mask_png),
             "inpaint_mask": (os.path.basename(inpaint_mask_png)
                              if inpaint_mask_png else None),
+            "context_mode": context_mode,
+            "context_source": (os.path.basename(context_path)
+                               if context_path else None),
             "view": [list(map(float, row)) for row in np.asarray(view).tolist()],
             "cam_loc": [float(x) for x in np.asarray(cam_loc).ravel().tolist()],
             "lens": float(lens), "sensor_w": float(sensor_w),
@@ -810,6 +850,8 @@ def _run_pipeline(job, snap, bridge):
             json.dump({"resolution": snap["render_resolution"],
                        "work_resolution": snap["work_resolution"],
                        "layer": layer_name, "object": obj_name,
+                       "view_context_mode": context_mode,
+                       "view_context_supported": context_supported,
                        "uv_snapshot": UV_SNAPSHOT_FILENAME,
                        "views": view_records}, f, indent=2)
     except Exception:
@@ -965,7 +1007,7 @@ def _run_pipeline(job, snap, bridge):
                               for i in range(n_views)]
     if snap.get("save_experiment_snapshot", False):
         exp_dir = _save_experiment_bundle(
-            cache_dir, snap, job, fmt, n_views, ai_field,
+            cache_dir, snap, job, n_views, ai_field,
             weartime_before_post, weartime_uv, replayed=False)
         job.meta["experiment_dir"] = exp_dir
     job.state = JobState.DONE
@@ -1231,7 +1273,7 @@ def _run_replay(job, snap, bridge):
     job.meta["replayed"] = True
     if snap.get("save_experiment_snapshot", False):
         exp_dir = _save_experiment_bundle(
-            cache_dir, snap, job, fmt, n_views, ai_field,
+            cache_dir, snap, job, n_views, ai_field,
             weartime_before_post, weartime_uv, replayed=True)
         job.meta["experiment_dir"] = exp_dir
     job.state = JobState.DONE

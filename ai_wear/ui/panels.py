@@ -75,6 +75,7 @@ class AIWEAR_PT_capture(bpy.types.Panel):
         if s.camera_preset in {"AUTO_COUNT", "CUSTOM"}:
             layout.prop(s, "camera_count")
         layout.prop(s, "render_resolution")
+        layout.prop(s, "view_context_mode")
         layout.prop(s, "coverage_target")
         layout.prop(s, "use_comfy_inpaint")
         if s.use_comfy_inpaint:

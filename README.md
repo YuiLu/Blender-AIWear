@@ -1,150 +1,487 @@
 # Blender AI Wear
 
-把 2D 生图模型给出的磨损语义，稳定重投影到 Blender 网格表面，生成可单调调节的
-`WearTime` 与材质叠加层。AI 只负责“磨损长什么样”，相机、深度、几何与 UV 决定
-“磨损落在哪里”。
+Blender AI Wear 把图像生成模型给出的磨损语义重新定位到网格表面，输出：
 
-## 安装与运行
+- `AIWear_Mask.png`：AI 在哪些表面区域观察到了磨损；
+- `WearTime.png`：每个表面位置从什么时候开始出现磨损；
+- `AIWear_WornTex.png`：AI 生成的局部颜色变化，而不是整张带光照渲染图；
+- 自动接入原材质的 Shader 预览。
 
-要求 Blender 3.6+，无需额外 pip 依赖。
-
-1. 将 `ai_wear/` 放入 Blender 用户 `scripts/addons/`，或把仓库打成顶层为
-   `ai_wear/` 的 zip 后安装。
-2. 在 `Edit > Preferences > Add-ons > AI Wear Texture` 配置 Provider、模型和密钥。
-3. 选中一个 Mesh，在 `N > AI Wear` 选择 UV、相机与参数，先运行 Preflight，
-   再点 `Generate Wear Texture`。
-4. 完成后拖动 `Wear Amount` 和 `Feather` 实时预览；这两个参数不重新请求 AI。
-5. 调试下游参数时使用 `Replay Downstream`，复用缓存视图，不消耗生图额度。
-
-Provider 支持 OpenAI、Gemini、ComfyUI 和可配置的 OpenAI-compatible / Raw JSON
-HTTP 端点。API key 只保存在 Add-on Preferences，也可用环境变量覆盖。
-
-## 算法
+核心分工是：**AI 决定磨损外观，Blender 的相机、深度、法线、拓扑与 UV 决定磨损位置和生长方式。**
 
 ```text
-UV/QC → 多视角 clean render → AI edit/inpaint → clean/worn diff
-     → 相机 + Z-buffer 重投影 → 多视角表面融合 → 几何先验
-     → 拓扑 WearTime → seam fusion / padding → 贴图与 Shader
+Mesh / UV
+  ↓
+多视角 Clean Render ──→ AI Edit ──→ Clean/Worn 差分 Mask
+  ↓ 相机矩阵 + Z-buffer                    ↓
+表面重投影 ←───────────────────────────────┘
+  ↓
+多视角融合 AI Field + 几何先验
+  ↓
+网格拓扑传播得到 WearTime
+  ↓
+UV Seam Fusion + Padding
+  ↓
+WearTime / WornTex / Shader
 ```
 
-### 1. 表面参数化
+## 1. 安装与基本使用
 
-- Mode A 使用指定现有 UV；重叠岛共享磨损。
-- Mode B 新建 `AI_WearUV`，不修改原材质 UV。
-- UV 光栅化为每个 texel 保存三角形 id 与重心坐标，因此可直接恢复 3D 位置和法线，
-  不做逐 texel ray cast。
-- 完整运行保存 per-loop UV 快照；Replay 在拓扑一致时可精确恢复缺失的 Wear UV。
+要求 Blender 3.6+；运行期只使用 Blender 自带的 `bpy`、`bmesh`、`mathutils`、`numpy`
+和 Python 标准库，不需要额外安装 pip 包。
 
-### 2. 视图差分与重投影
+1. 把 `ai_wear/` 放入 Blender 用户 `scripts/addons/`，或者安装本仓库生成的 zip。
+2. 在 `Edit > Preferences > Add-ons > AI Wear Texture` 中配置 Provider。
+3. 选中一个 Mesh，打开 `N > AI Wear`。
+4. 选择 UV Mode、相机、Prompt 和 WearTime 参数。
+5. 先运行 Preflight，再运行 `Generate Wear Texture`。
+6. 完成后直接拖动 `Wear Amount` / `Feather`；不会重新请求 AI。
+7. 只修改几何先验、拓扑、seam 或生长参数时，用 `Replay Downstream` 复用上次 AI 图。
 
-每个固定相机生成 `clean_Vi`，AI 在相同构图上生成 `worn_Vi`。颜色、梯度和结构差异
-经鲁棒归一化得到屏幕 mask `M_i`。已知相机矩阵与软件 Z-buffer 后，UV texel 的表面点
-只有在当前视图可见时才接收该像素观测：
+Provider 支持 OpenAI、Gemini、ComfyUI，以及 OpenAI-compatible / Raw JSON 自定义端点。
+API key 保存在 Add-on Preferences，不写入 `.blend`；也可以通过环境变量提供。
+
+## 2. UV 表面参数化
+
+### 2.1 两种 UV 模式
+
+- **Mode A**：使用已有 UV。适合生产资产已经有可靠贴图 UV 的情况；重叠 UV 会共享同一磨损。
+- **Mode B**：创建独立的 `AI_WearUV` 并自动展开，不改变原材质纹理使用的 UV。
+
+Preflight 检查 UV 是否存在、是否落在 `[0,1]`、退化三角形、翻转和重叠情况。Mode B
+创建后会保存精确的 per-loop UV 快照 `AIWear_UVSnapshot.npz`。Replay 如果发现 Wear UV
+丢失，会先验证顶点、loop、polygon 数量，再恢复完全相同的 UV；不会猜测其他 UV 层。
+
+### 2.2 UVField 为什么能连接 2D 与 3D
+
+插件把目标 UV 光栅化成一个 `work_resolution × work_resolution` 网格。对每个有效 texel
+保存：
 
 ```text
-w_i = visible_i · max(0, dot(n, view_i))^gamma · confidence_i
-F_ai = robust_weighted_mean(M_i, w_i)
+triangle_id(u,v)
+barycentric(u,v) = (b0, b1, b2)
 ```
 
-`views/diff_mask_V*.png` 保存实际参与重投影的 16-bit RGB 灰度 mask；
-`AIWear_Mask.png` 是融合后的 UV 域 AI 证据。
-
-### 3. 几何先验与 WearTime
-
-AI 证据先从 UV 转到顶点，再与凸度、曝光度、凹陷惩罚组合：
+假设该 texel 位于三角形 `(V0,V1,V2)`，则它的世界位置和法线可以直接重建：
 
 ```text
-P(v) = clamp(w_ai·F_ai + w_convex·C+ + w_expose·E - w_cavity·C-)
-edge_cost(i,j) = length(i,j) / (eps + mean(P_i,P_j)^gamma)
-T(v) = clamp(alpha·normalize(Dijkstra(v)) + (1-alpha)·(1-P(v)) + noise3D)
+P(u,v) = b0·V0 + b1·V1 + b2·V2
+N(u,v) = normalize(b0·N0 + b1·N1 + b2·N2)
 ```
 
-高 `P` 的局部极大值是磨损种子；多源 Dijkstra 沿真实网格拓扑传播。噪声采样物体
-空间而非 UV，因此不会在 UV seam 处自行断裂。`Wear Amount` 只在 Shader 中阈值化：
+这样每个 UV texel 都知道自己对应模型表面的哪个点。后续投影是数组运算，不需要对每个
+texel 调用 Blender `ray_cast`。
+
+## 3. 多视角采集与 AI 生成
+
+### 3.1 相机
+
+插件在 evaluated mesh 的世界空间包围盒上计算中心与半对角线半径，用 50mm 透视相机
+自动 framing。预设包括：
+
+- Auto 6：四个环绕视角 + 顶部 + 底部；
+- Auto 8：六个环绕视角 + 顶部 + 底部；
+- Turntable 4：四个水平视角；
+- Counted Auto：按 Fibonacci sphere 均匀生成精确的 `Cam Count`；
+- Custom：使用场景中名为 `AIWearCam_*` 的相机。
+
+每个相机生成构图、材质、背景和光照固定的 `clean_Vi.png`。AI 的任务不是重新设计物体，
+而是在相同图像坐标中加入磨损。
+
+### 3.2 视角上下文
+
+`View Context` 控制多张图是否顺序条件化：
+
+| 模式 | 第 i 张图的输入 |
+| --- | --- |
+| Independent | 当前 `clean_Vi`，没有其他 worn 图 |
+| First-view Anchor | 当前 clean + 第一张 `worn_V0` |
+| Previous View | 当前 clean + 紧邻的上一张 `worn_V(i-1)` |
+
+第一张始终只有 clean。`First-view Anchor` 倾向锁定一种统一磨损风格；`Previous View`
+传递的是局部连续上下文，但也可能逐帧累积偏差；`Independent` 没有误差传播，但不同视角
+可能各自生成不同颜色和磨损尺度。
+
+存在 context 时，插件会额外明确告诉模型：第一张图是必须保持构图的当前 clean target，
+第二张只是磨损材质、颜色、划痕尺度和严重程度的风格参考，不能复制它的相机与几何。
+
+该输入只在 Provider 声明支持参考图时生效，目前内置实现中是 Gemini。ComfyUI 的可移植
+原生 inpaint 图不带 IP-Adapter，因此不伪装成支持跨图 context。每个视角实际使用的
+`context_source` 会写入 `views.json`，实验时可以检查，而不是只相信 UI 开关。
+
+## 4. 从 AI 图提取磨损证据
+
+AI 经常让整张图略微变亮、变暗或偏色。如果直接 `abs(worn-clean)`，这种全局色调变化会
+被误认为全模型磨损。插件先对 worn 做逐通道均值匹配：
 
 ```text
-gate = smoothstep(T - feather, T + feather, amount)
-final_mask = gate · AI_evidence
+scale_c = mean(clean_c) / mean(worn_c)
+worn_matched_c = clamp(worn_c · scale_c)
 ```
 
-因此 Amount 单调增长，100% 也只显示有 AI 磨损证据的区域。
+然后同时计算亮度差与最大通道差：
 
-### 4. 外观叠加
+```text
+d_luma = |luma(worn_matched) - luma(clean)|
+d_rgb  = max_c |worn_matched_c - clean_c|
+d      = max(d_luma, d_rgb)
+M_i    = clamp(d / max(P95(d > 0.02), 0.05))
+```
 
-插件不把 AI 渲染图直接当 albedo。它重投影并编码 `clean → worn` 的有界颜色残差，
-写入 `AIWear_WornTex.png`：RGB 为残差，Alpha 为 AI evidence。节点组通过显式 Wear UV
-解码残差并叠加到原 Principled Base Color，同时保留原法线、粗糙度、金属度和其他材质连接。
-共享材质会先复制为对象私有材质，避免影响其他对象。
+这一步得到屏幕空间 mask `M_i`。它回答的是“AI 在这张图的哪些像素做了局部修改”，而不是
+“这个像素是否被相机看见”。两者必须分开，否则相机覆盖率接近 100% 时整个模型都会变白。
 
-### 5. Seam 与 padding
+实际参与投影的浮点 mask 会以 16-bit RGB 灰度图保存为：
 
-同一 3D 边在两个 UV 岛上的 texel 构成 seam pair；融合阶段在 pair 间平均并做有限扩散。
-padding 单独对岛外 texel 膨胀，抑制双线性采样和 mipmap 漏色。二者是独立开关，便于
-做无处理 / 仅融合 / 仅 padding / 两者都开四组实验。
+```text
+views/diff_mask_V0.png
+views/diff_mask_V1.png
+...
+```
 
-## ComfyUI / Liblib
+## 5. 屏幕 Mask 如何落回模型表面
 
-仓库包含一对同源的纯原生节点工作流：
+### 5.1 软件 Z-buffer
+
+插件把网格三角形投影到每个相机的屏幕，光栅化出该像素最靠近相机的深度 `Z_i(x,y)`。
+对于 UVField 中的表面点 `P(u,v)`：
+
+1. 用相机逆世界矩阵把 `P` 变换到相机空间；
+2. 用 lens / sensor width 做透视投影，得到屏幕坐标 `(x,y)` 和深度 `z`；
+3. 检查点在画面内且 `z <= Z_i(x,y) + depth_epsilon`；
+4. 不满足时说明该表面点被遮挡，当前视角不能给它写 mask。
+
+### 5.2 朝向权重
+
+可见不等于可靠。掠射角的像素被压缩，重投影误差大，因此使用：
+
+```text
+view_dir = normalize(camera_position - P)
+facing_i = clamp(dot(N, view_dir), 0, 1)^gamma
+w_i      = visible_i · facing_i
+```
+
+`gamma` 越大，越信任正对相机的视角，越排斥侧视角。mask 和颜色残差使用完全相同的
+坐标、可见性与权重，因此二者不会各自落到不同 texel。
+
+## 6. 多视角融合
+
+每个 UV texel 累加来自所有可见相机的观测：
+
+```text
+sum_mask += w_i · M_i(x,y)
+sum_weight += w_i
+F_ai = clamp(sum_mask / sum_weight)
+```
+
+融合后还会计算 8 邻域局部均值。如果某 texel 与邻域差值大于 `0.5`，就把它拉回自身与
+邻域均值的中点，抑制单视角产生的极端亮点：
+
+```text
+F_ai ← 0.5 · (F_ai + neighbor_mean)
+```
+
+最终 `F_ai` 保存为 `AIWear_Mask.png`，也是后续几何先验中 `w_ai` 对应的输入。
+
+## 7. 几何先验是什么、怎么计算、有什么作用
+
+AI mask 只描述可见图像变化，不知道资产真实拓扑，也容易把平面光照变化当磨损。几何先验
+用于把磨损倾向拉回物理上更合理的位置。
+
+### 7.1 Signed Convexity
+
+对每条恰好连接两个面的拓扑边，取两个面法线 `n0,n1`、面中心 `c0,c1` 和边中点 `m`：
+
+```text
+magnitude = (1 - clamp(dot(n0,n1), -1, 1)) / 2
+sign      = sign(dot(n0,m-c0) + dot(n1,m-c1))
+C_edge    = sign · magnitude
+C_vertex  = incident edge C_edge 的平均
+```
+
+- `C > 0`：凸起、棱边、容易碰撞的位置；
+- `C < 0`：凹槽、内角、相对受保护的位置；
+- `|C|`：由相邻面夹角决定，平面附近接近 0。
+
+`w_convex` 提高凸边的磨损倾向；`w_cavity` 从倾向中扣除凹陷区域，防止所有高对比边都被磨损。
+
+### 7.2 Exposure
+
+每个自动相机都用同一 Z-buffer 判断顶点是否可见。某顶点被 `n` 个视角看到、总视角为 `N`：
+
+```text
+E(v) = clamp(n / N, 0, 1)
+```
+
+它是可接近性近似：长期暴露、容易被观察到的外表面权重高，封闭内腔低。它不是严格的接触
+或受力模拟，但能减少磨损向隐藏区域无条件扩散。
+
+### 7.3 Propensity
+
+AI mask 先通过 UV 重心权重累积到顶点，得到 `F_ai(v)`。最终磨损倾向为：
+
+```text
+C+ = max(C, 0)
+C- = max(-C, 0)
+
+P(v) = clamp(
+    w_ai     · F_ai(v)
+  + w_convex · C+(v)
+  + w_expose · E(v)
+  - w_cavity · C-(v),
+  0, 1)
+```
+
+各权重的作用：
+
+| 参数 | 增大后的结果 |
+| --- | --- |
+| `w_ai` | 更服从 AI 图中的 scratches/chipping 分布 |
+| `w_convex` | 更集中于凸棱和硬边 |
+| `w_expose` | 更偏向外露表面，减少隐藏面的磨损 |
+| `w_cavity` | 更强地保护凹槽和内角 |
+
+关闭 `Geometry Prior` 时，后三项被置零，但管线仍正常运行；关闭 `AI Evidence` 时只把
+`w_ai` 置零，用于观察纯几何规则能产生什么结果。
+
+## 8. 拓扑传播如何生成 WearTime
+
+`P(v)` 只表示“哪里适合磨损”，还不是可随 Amount 单调展开的先后顺序。WearTime 把它转换为
+`T(v)∈[0,1]`：值越小越早出现磨损。
+
+### 8.1 选择生长种子
+
+候选顶点需要：
+
+- `P(v) >= 0.18`；
+- `P(v)` 不低于所有一环邻居，是局部极大值。
+
+候选按 `P` 从高到低排序，再做空间抑制：新种子必须与已保留种子相距超过模型包围半径的
+`10%`。这样不会在同一条棱上密集产生几十个几乎相同的起点。没有局部极大值时退化为
+`P` 最高的一小组顶点。
+
+### 8.2 在网格图上计算传播代价
+
+网格顶点是图节点，真实 mesh edge 是图边。边 `(i,j)` 的代价为：
+
+```text
+P_mean = max((P_i + P_j)/2, 1e-3)
+cost(i,j) = edge_length / (1e-4 + P_mean^gamma)
+```
+
+高倾向区域 `P_mean` 大，传播代价低；低倾向区域代价高。于是磨损优先沿凸边、AI 证据和外露
+区域走，而不是在 UV 图上直线扩散。
+
+如果边两侧 polygon 的 `material_index` 不同，并开启 `Material Boundary Barrier`：
+
+```text
+cost(i,j) *= material_boundary_penalty
+```
+
+这让涂漆塑料与金属、外壳与按钮之间不容易互相串色，但不是绝对禁止跨越。
+
+### 8.3 多源 Dijkstra
+
+所有种子以距离 0 同时进入优先队列，运行 multi-source Dijkstra，得到每个顶点从“最容易
+磨损种子”到达的最小累计代价 `D(v)`：
+
+```text
+T_base(v) = D(v) / max(D)
+```
+
+这就是拓扑传播：它只沿真实网格边移动，所以 UV 岛即使被切开，属于同一 mesh 的磨损仍然
+在 3D 拓扑上连续。
+
+关闭 `Topology Growth` 时不会运行 Dijkstra，而是直接使用 `1-P` 作为 WearTime 主体；
+这是可运行的消融分支，不会停在半条管线上。
+
+### 8.4 最终生长形态
+
+开启拓扑传播时：
+
+```text
+T(v) = clamp(
+    alpha · T_base(v)
+  + (1-alpha) · (1-P(v))
+  + noise_amp · (2·noise3D(position·noise_scale)-1),
+  0, 1)
+```
+
+最后做两轮一环平滑：
+
+```text
+T_new(v) = 0.5·T(v) + 0.5·mean(T(neighbors))
+```
+
+参数如何控制形态：
+
+| 参数 | 小值 | 大值 |
+| --- | --- | --- |
+| `alpha` | 贴着局部 `P`，碎、直接、像阈值 AI/几何图 | 强调从种子沿拓扑扩张，形成连续生长带 |
+| `noise_amp` | 边界平滑、规则 | 边界破碎、斑驳；过大会产生孤立噪点 |
+| `noise_scale` | 大块、低频变化 | 小块、细碎变化 |
+| `gamma` | 传播较容易穿过中低 P 区域；视角权重也较宽松 | 更沿高 P 通道生长；投影也更偏向正视角 |
+| `material_boundary_penalty` | 容易跨材质传播 | 材质边界更像阻挡 |
+| `Feather` | Shader 阈值边缘硬 | 只改变最终显示过渡，不重算 T |
+
+注意当前 `gamma` 同时用于投影视角朝向和 Dijkstra 代价指数，这是当前实现的共享“选择性”
+控制：增大后既更排斥掠射投影，也更强迫传播沿高 propensity 区域前进。
+
+## 9. WearTime 如何回到 UV
+
+顶点 WearTime 再按 UVField 保存的三角形与重心坐标插值：
+
+```text
+T(u,v) = b0·T(V0) + b1·T(V1) + b2·T(V2)
+```
+
+因此 Dijkstra 在 3D 网格图上做，贴图只承担最终存储与 Shader 采样。拓扑连续性不会依赖
+两个 UV 岛在贴图上是否相邻。
+
+## 10. Seam Fusion 与 Padding
+
+### 10.1 为什么拓扑连续后仍需要 Seam Fusion
+
+WearTime 主体从同一个顶点场烘焙，低频上已经跨 seam 连续；但不同 UV 岛的 texel 中心、
+插值和多视角高频颜色残差仍可能不一致。双线性采样和 mipmap 会把这种小差异放大成接缝。
+
+### 10.2 Seam Registry
+
+插件遍历每条恰好连接两个面的拓扑边。如果同一端点在两个 face loop 中的 UV 坐标不同，
+该边就是 UV seam。Registry 保存同一条 3D 边两侧的 UV 线段：
+
+```text
+side A: uv_a(t) = (1-t)·a0 + t·a1
+side B: uv_b(t) = (1-t)·b0 + t·b1
+```
+
+### 10.3 融合
+
+沿同一拓扑位置 `t` 双线性采样两侧：
+
+```text
+value(t) = 0.5 · (sample(A,t) + sample(B,t))
+```
+
+再把相同 `value(t)` 写回两侧。`Seam Diffuse` 决定写回半径，实际 stamp radius 为
+`max(1, diffuse_texels/4)`。WearTime、WornTex RGB 和 evidence alpha 都执行同样的配对融合，
+避免 mask 连续而颜色仍断裂。
+
+### 10.4 Padding 不是 Seam Fusion
+
+Padding 从 UV 岛有效 texel 向空白区做多轮四邻域膨胀，每轮用已有邻居均值填一个 texel。
+它解决岛边界采样漏色，不负责让 seam 两侧数值相等。
+
+两者已经解耦，可以分别关闭：
+
+| Seam Fusion | Padding | 作用 |
+| --- | --- | --- |
+| off | off | 原始烘焙结果 |
+| on | off | 只让同一 3D seam 两侧一致 |
+| off | on | 只扩展岛边颜色 |
+| on | on | 生产默认设置 |
+
+## 11. Shader 如何应用 AI 磨损
+
+插件不会把 AI 的 worn render 直接当 Base Color；那样会把视图光照烘进材质，再被 Blender
+灯光照第二次。它保存曝光匹配后的颜色差：
+
+```text
+delta = worn_matched - clean
+encoded_rgb = 0.5 + 0.5·delta
+```
+
+写贴图前把 delta 限制在 `[-0.06, +0.28]`，抑制 AI 全局重打光。WornTex alpha 来自
+`F_ai` 的平滑证据窗 `[0.06,0.55]`，不是相机 coverage。
+
+Shader 中：
+
+```text
+gate = smoothstep(T - feather, T + feather, wear_amount)
+mask = gate · worn_tex.alpha
+worn_color = original_base_color + 2·(worn_tex.rgb - 0.5)
+final_base_color = mix(original_base_color, worn_color, mask)
+```
+
+因此：
+
+- `Wear Amount=30/60/100` 是同一张 WearTime 的阈值，天然满足集合单调增长；
+- 100% 只打开所有有 AI evidence 的区域，不会把全部相机覆盖区变白；
+- 原材质的 Normal、Roughness、Metallic 等连接保留；当前 AI 外观叠加只修改 Base Color；
+- 共享材质先复制成对象私有预览材质，不影响使用原材质的其他对象。
+
+## 12. ComfyUI / Liblib 局部重绘
+
+仓库提供同一张图的两种序列化：
 
 - [`examples/comfyui/aiwear_inpaint_workflow.json`](examples/comfyui/aiwear_inpaint_workflow.json)：
-  UI 格式，导入 ComfyUI 或 Liblib 画布。
+  UI 格式，导入 ComfyUI / Liblib 画布；
 - [`examples/comfyui/aiwear_inpaint_api.json`](examples/comfyui/aiwear_inpaint_api.json)：
-  API 格式，Blender 插件通过 `/prompt` 执行。
+  API 格式，Blender 通过 `/prompt` 调用。
 
-工作流使用 `VAEEncodeForInpaint` 做局部重绘，并在输出前再次按 mask 与 clean view 合成，
-未选区域保持不变。Blender 会从物体轮廓与深度突变生成每视角
-`inpaint_mask_V*.png`。节点映射固定为：Clean `2`、Mask `3`、Prompt `4`、Seed `7`、
-Output `10`。平台上只需在节点 1 选择已有的 inpainting checkpoint。
+工作流只使用原生节点：
 
-插件会在排队前验证 API 图中所有节点引用与 Preferences 映射。UI JSON 不能误选为插件
-API JSON；两者用途见 [`examples/comfyui/README.md`](examples/comfyui/README.md)。
+```text
+CheckpointLoaderSimple
+  ├─ CLIPTextEncode positive / negative ──────────────┐
+Clean LoadImage ─┐                                    │
+Mask LoadImage ──┴─→ VAEEncodeForInpaint → KSampler → VAEDecode
+Clean + decoded + mask → ImageCompositeMasked → SaveImage
+```
 
-## 实验与消融
+Blender 根据轮廓内侧带和屏幕深度高梯度区域生成 `inpaint_mask_Vi.png`。RGBA alpha 按
+ComfyUI `LoadImage` 的反 alpha mask 约定写入；最后再按 mask 合成，非目标像素使用原 clean。
 
-`N > AI Wear > Experiments / Ablation` 可独立关闭：
+默认节点映射：Clean `2`、Mask `3`、Prompt `4`、Seed `7`、Output `10`。Liblib 导入 UI
+JSON 后只需在节点 1 选择平台已有的 inpainting checkpoint。插件安装包内也自带 API JSON。
 
-- AI Evidence
-- Geometry Prior
-- Topology Growth
-- Seam Fusion
-- Island Padding
-- Geometry Inpaint Mask
+## 13. 实验开关与输出
 
-相机选 `Counted Auto` 后，`Cam Count` 精确控制为 1–16 个 Fibonacci-sphere 视角。
-开启 `Save Experiment Snapshot` 后，每次运行或 Replay 会写入：
+`N > AI Wear > Experiments / Ablation` 提供实际执行分支：
+
+- `AI Evidence`：关闭后 `w_ai=0`；
+- `Geometry Prior`：关闭 convexity/exposure/cavity；
+- `Topology Growth`：关闭 Dijkstra，直接由 `1-P` 生成 T；
+- `Seam Fusion` 与 `Island Padding`：独立后处理开关；
+- `Save Experiment Snapshot`：保存本次定性对照材料。
+
+相机数量与 `View Context` 在 Capture 面板设置。实验快照包含最终贴图、seam/padding 前后
+WearTime，以及完整的 clean/worn/diff/context 视图序列：
 
 ```text
 .ai_wear_cache/<object>/experiments/<label>_<job_id>/
 ├─ config.json
-├─ metrics.json
+├─ metrics.json                 # 只记录 elapsed_seconds
 ├─ AIWear_Mask.png
 ├─ WearTime_before_seam_padding.png
 ├─ WearTime_after_seam_padding.png
 ├─ WearTime.png
-└─ AIWear_WornTex.png
+├─ AIWear_WornTex.png
+└─ views/
+   ├─ views.json
+   ├─ clean_V*.png
+   ├─ worn_V*.png
+   ├─ diff_mask_V*.png
+   └─ inpaint_mask_V*.png
 ```
 
-推荐实验矩阵、指标与变量控制见 [`EXPERIMENTS.md`](EXPERIMENTS.md)。
+定性实验组合与截图重点见 [`EXPERIMENTS.md`](EXPERIMENTS.md)。
 
-## 输出与代码结构
+## 14. 缓存、线程与代码位置
 
-主要输出位于 `<blend>/.ai_wear_cache/<object>/`：
+默认缓存：`<blend>/.ai_wear_cache/<object>/`。`Replay Downstream` 使用缓存的 clean/worn、
+精确相机矩阵和 UV snapshot，所以改变下游 feature 不需要再次生图。
 
-- `views/clean_V*`, `worn_V*`, `diff_mask_V*`, `inpaint_mask_V*`, `views.json`
-- `AIWear_Mask.png`：重投影融合后的 AI 磨损证据
-- `WearTime.png`：可单调阈值化的磨损时间场
-- `AIWear_WornTex.png`：颜色残差 + evidence alpha
-- `AIWear_UVSnapshot.npz`：Replay 所需 Wear UV
-
-核心模块：
+网络和 NumPy 工作运行在 worker；渲染、UV、bmesh、材质和 Blender image data 操作通过
+`MainThreadBridge` 回到主线程，由 `bpy.app.timers` 驱动。这样网络等待不会锁死 Blender UI。
 
 ```text
-ai_wear/render      相机与 clean pass
-ai_wear/ai          Provider 与 ComfyUI 图执行
-ai_wear/uv          UV QC、光栅化、seam registry
-ai_wear/surface     mask 投影、多视角融合、几何先验、拓扑生长
-ai_wear/shader      对象私有材质与实时 WearTime 节点组
-ai_wear/operators   后台任务、缓存、Replay、实验快照
+ai_wear/render       自动相机与 clean render
+ai_wear/ai           Provider、ComfyUI graph 执行
+ai_wear/uv           UV QC、UVField、seam registry
+ai_wear/surface      差分、重投影、融合、几何先验、Dijkstra
+ai_wear/shader       WearTime gate 与原材质叠加
+ai_wear/operators    管线、缓存、Replay、实验快照
 ```
 
 模块拆解与验收映射见 `Blender_AI_Wear_Texture_Plugin_Implementation_Plan.md`。

@@ -45,6 +45,12 @@ STRATEGY_ITEMS = (
      "Provider-specific custom workflow (e.g. ComfyUI node graph)"),
 )
 
+VIEW_CONTEXT_ITEMS = (
+    ("NONE", "Independent", "Generate every view from its clean render only"),
+    ("FIRST_ANCHOR", "First-view Anchor", "Use the first generated worn view as context for every later view"),
+    ("PREVIOUS_VIEW", "Previous View", "Use the immediately preceding worn view as context for the next view"),
+)
+
 EXPORT_ITEMS = (
     ("PNG16", "PNG 16-bit", "16-bit PNG (Non-Color) — Substance/Blender ready"),
     ("EXR", "OpenEXR 32-bit float", "Full float precision"),
@@ -106,6 +112,9 @@ class AIWearSceneSettings(PropertyGroup):
     camera_preset: EnumProperty(items=CAMERA_PRESET_ITEMS, name="Cameras", default="AUTO_6")
     camera_count: IntProperty(name="Cam Count", default=6, min=1, max=16)
     render_resolution: IntProperty(name="Render Res", default=1024, min=512, max=4096)
+    view_context_mode: EnumProperty(
+        items=VIEW_CONTEXT_ITEMS, name="View Context", default="FIRST_ANCHOR",
+        description="Sequential multi-view context; used only by providers that support reference images")
 
     # --- AI provider overrides --------------------------------------------
     provider_override: EnumProperty(
