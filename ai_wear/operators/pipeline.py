@@ -46,6 +46,7 @@ class PrefsSnap:
         self.comfyui_url = prefs.comfyui_url
         self.workflow_path = prefs.workflow_path
         self.clean_image_node = prefs.clean_image_node
+        self.mask_image_node = prefs.mask_image_node
         self.prompt_node = prefs.prompt_node
         self.seed_node = prefs.seed_node
         self.output_node = prefs.output_node
@@ -140,9 +141,17 @@ def snapshot_context(context) -> dict:
         "use_barrier": s.use_barrier,
         "mat_penalty": s.material_boundary_penalty,
         "coverage_target": s.coverage_target,
+        "use_comfy_inpaint": s.use_comfy_inpaint,
+        "inpaint_edge_width": s.inpaint_edge_width,
         "seam_fuse": s.seam_fuse,
         "seam_diffuse": s.seam_diffuse_texels,
+        "use_padding": s.use_padding,
         "padding": s.padding_texels,
+        "use_ai_evidence": s.use_ai_evidence,
+        "use_geometry_prior": s.use_geometry_prior,
+        "use_topology_growth": s.use_topology_growth,
+        "save_experiment_snapshot": s.save_experiment_snapshot,
+        "experiment_label": s.experiment_label,
         "export_format": s.export_format,
         "wear_amount": s.wear_amount,
         "feather": s.feather,
@@ -273,6 +282,69 @@ def _save_view_diff_mask(path: str, mask: np.ndarray) -> str:
     return utils.save_image(path, rgba, "PNG16")
 
 
+def _binary_erode4(mask: np.ndarray, iterations: int) -> np.ndarray:
+    out = np.asarray(mask, dtype=bool).copy()
+    for _ in range(max(0, int(iterations))):
+        if not out.any():
+            break
+        nxt = np.zeros_like(out)
+        nxt[1:-1, 1:-1] = (out[1:-1, 1:-1]
+                              & out[:-2, 1:-1] & out[2:, 1:-1]
+                              & out[1:-1, :-2] & out[1:-1, 2:])
+        out = nxt
+    return out
+
+
+def _binary_dilate4(mask: np.ndarray, iterations: int) -> np.ndarray:
+    out = np.asarray(mask, dtype=bool).copy()
+    for _ in range(max(0, int(iterations))):
+        padded = np.pad(out, 1, mode="constant")
+        out = (padded[1:-1, 1:-1] | padded[:-2, 1:-1]
+               | padded[2:, 1:-1] | padded[1:-1, :-2]
+               | padded[1:-1, 2:])
+    return out
+
+
+def _build_geometry_inpaint_mask(depth: np.ndarray, coverage: np.ndarray,
+                                 edge_width: int) -> np.ndarray:
+    """Build a screen-space local-redraw mask from silhouette + depth edges."""
+    cov = np.asarray(coverage, dtype=bool)
+    width = max(1, int(edge_width))
+    silhouette = cov & ~_binary_erode4(cov, width)
+
+    z = np.asarray(depth, dtype=np.float32)
+    grad = np.zeros_like(z)
+    valid_x = cov[:, 1:] & cov[:, :-1]
+    valid_y = cov[1:, :] & cov[:-1, :]
+    dx = np.zeros_like(z)
+    dy = np.zeros_like(z)
+    with np.errstate(invalid="ignore"):
+        delta_x = np.abs(z[:, 1:] - z[:, :-1])
+        delta_y = np.abs(z[1:, :] - z[:-1, :])
+    delta_x = np.nan_to_num(delta_x, nan=0.0, posinf=0.0, neginf=0.0)
+    delta_y = np.nan_to_num(delta_y, nan=0.0, posinf=0.0, neginf=0.0)
+    dx[:, 1:] = np.where(valid_x, delta_x, 0.0)
+    dy[1:, :] = np.where(valid_y, delta_y, 0.0)
+    grad = np.maximum(dx, dy)
+    samples = grad[(grad > 0) & np.isfinite(grad)]
+    if samples.size:
+        threshold = float(np.percentile(samples, 92.0))
+        depth_edges = cov & (grad >= max(threshold, 1e-7))
+        depth_edges = _binary_dilate4(depth_edges, max(1, width // 3))
+    else:
+        depth_edges = np.zeros_like(cov)
+    return (silhouette | depth_edges).astype(np.float32)
+
+
+def _save_comfy_inpaint_mask(path: str, mask: np.ndarray) -> str:
+    """Save an RGBA mask matching ComfyUI LoadImage's inverse-alpha convention."""
+    m = np.clip(np.asarray(mask, dtype=np.float32), 0.0, 1.0)
+    rgba = np.empty((m.shape[0], m.shape[1], 4), dtype=np.float32)
+    rgba[..., :3] = m[..., None]
+    rgba[..., 3] = 1.0 - m  # ComfyUI LoadImage outputs MASK = 1 - alpha.
+    return utils.save_image(path, rgba, "PNG8")
+
+
 def _save_uv_texture(path: str, rgba: np.ndarray, fmt: str) -> str:
     """Save a UV-domain array with Blender/image row orientation corrected.
 
@@ -281,6 +353,83 @@ def _save_uv_texture(path: str, rgba: np.ndarray, fmt: str) -> str:
     captures and per-view diff masks are already top-row-first.
     """
     return utils.save_image(path, np.ascontiguousarray(rgba[::-1]), fmt)
+
+
+def _effective_weights(snap: dict) -> dict:
+    weights = dict(snap["weights"])
+    if not snap.get("use_ai_evidence", True):
+        weights["w_ai"] = 0.0
+    if not snap.get("use_geometry_prior", True):
+        weights["w_convex"] = 0.0
+        weights["w_expose"] = 0.0
+        weights["w_cavity"] = 0.0
+    return weights
+
+
+def _experiment_config(snap: dict, n_views: int, replayed: bool) -> dict:
+    keys = (
+        "uv_mode", "target_uv_layer", "work_resolution", "texture_size",
+        "camera_preset", "camera_count", "render_resolution", "provider",
+        "model", "strategy", "prompt", "seed", "lock_seed", "weights",
+        "gamma", "alpha", "noise_amp", "noise_scale", "use_barrier",
+        "mat_penalty", "coverage_target", "use_comfy_inpaint",
+        "inpaint_edge_width", "seam_fuse", "seam_diffuse", "use_padding",
+        "padding", "use_ai_evidence", "use_geometry_prior",
+        "use_topology_growth", "export_format", "wear_amount", "feather",
+    )
+    cfg = {key: snap.get(key) for key in keys}
+    cfg["effective_weights"] = _effective_weights(snap)
+    cfg["effective_view_count"] = int(n_views)
+    cfg["replayed"] = bool(replayed)
+    return cfg
+
+
+def _save_experiment_bundle(cache_dir: str, snap: dict, job, fmt: str,
+                            n_views: int, ai_field: np.ndarray,
+                            weartime_before: np.ndarray,
+                            weartime_after: np.ndarray,
+                            replayed: bool) -> str:
+    """Persist comparable ablation inputs/outputs without changing main outputs."""
+    import json
+    import shutil
+
+    label = utils.safe_name(snap.get("experiment_label") or "experiment")
+    exp_dir = os.path.join(cache_dir, "experiments", f"{label}_{job.id}")
+    utils.ensure_dir(exp_dir)
+
+    def _gray(field, name):
+        rgba = np.empty((*field.shape, 4), dtype=np.float32)
+        rgba[..., 0] = field
+        rgba[..., 1] = field
+        rgba[..., 2] = field
+        rgba[..., 3] = 1.0
+        _save_uv_texture(os.path.join(exp_dir, name), rgba, "PNG16")
+
+    _gray(ai_field, "AIWear_Mask.png")
+    _gray(weartime_before, "WearTime_before_seam_padding.png")
+    _gray(weartime_after, "WearTime_after_seam_padding.png")
+    for name in ("WearTime.png", "AIWear_WornTex.png", "AIWear_UVSnapshot.npz"):
+        src = os.path.join(cache_dir, name)
+        if os.path.isfile(src):
+            shutil.copy2(src, os.path.join(exp_dir, name))
+
+    metrics = {}
+    for key, value in job.meta.items():
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            metrics[key] = value
+    before = np.asarray(weartime_before, dtype=np.float32)
+    after = np.asarray(weartime_after, dtype=np.float32)
+    metrics.update({
+        "weartime_before_mean": float(before.mean()),
+        "weartime_after_mean": float(after.mean()),
+        "postprocess_mean_abs_delta": float(np.abs(after - before).mean()),
+    })
+    with open(os.path.join(exp_dir, "config.json"), "w", encoding="utf-8") as f:
+        json.dump(_experiment_config(snap, n_views, replayed), f,
+                  ensure_ascii=False, indent=2)
+    with open(os.path.join(exp_dir, "metrics.json"), "w", encoding="utf-8") as f:
+        json.dump(metrics, f, ensure_ascii=False, indent=2)
+    return exp_dir
 
 
 UV_SNAPSHOT_FILENAME = "AIWear_UVSnapshot.npz"
@@ -486,6 +635,7 @@ def _run_pipeline(job, snap, bridge):
         snap["camera_preset"], snap["camera_count"],
         depsgraph=bpy.context.evaluated_depsgraph_get())])
     n_views = len(cam_names)
+    job.meta["effective_view_count"] = n_views
     if n_views == 0:
         raise RuntimeError("No cameras generated.")
     _check_cancel(job)
@@ -534,6 +684,27 @@ def _run_pipeline(job, snap, bridge):
         bridge.run(lambda cn=cam_name, cp=clean_png: passes.render_clean(
             bpy.context.scene, bpy.data.objects.get(cn), cp, snap["render_resolution"], job))
 
+        # Projection/depth are known before AI. ComfyUI can therefore receive a
+        # deterministic geometry-derived inpaint mask rather than repainting the
+        # whole view and changing lighting/background/silhouette.
+        cam_data = bridge.run(lambda cn=cam_name: _cam_proj_data(
+            bpy.data.objects.get(cn), bpy.data.objects.get(obj_name),
+            snap["render_resolution"]))
+        view = cam_data["view"]
+        cam_loc = cam_data["cam_loc"]
+        lens = cam_data["lens"]
+        sensor_w = cam_data["sensor_w"]
+        rx = ry = snap["render_resolution"]
+        depth_buf, screen_coverage = projection.rasterize_screen_depth(
+            uvfield.vpos, uvfield.tri_vert, view, lens, sensor_w, rx, ry)
+        inpaint_mask_png = None
+        if (snap["provider"] == "COMFYUI" and snap.get("use_comfy_inpaint", True)
+                and cap.supports_mask):
+            inpaint_mask = _build_geometry_inpaint_mask(
+                depth_buf, screen_coverage, snap.get("inpaint_edge_width", 12))
+            inpaint_mask_png = os.path.join(out_dir, f"inpaint_mask_V{vi}.png")
+            _save_comfy_inpaint_mask(inpaint_mask_png, inpaint_mask)
+
         # AI generate (worker thread, HTTP only)
         job.state = JobState.AI; job.stage = JobStage.AI_SUBMIT
         job.message = f"View {vi+1}/{n_views}: AI generating…"
@@ -546,12 +717,13 @@ def _run_pipeline(job, snap, bridge):
             seed=seed,
             output_size=snap["render_resolution"],
             reference_images=refs,
-            mask_path=None,
+            mask_path=inpaint_mask_png,
             depth_path=None,
             normal_path=None,
             workflow_path=getattr(snap["prefs_obj"], "workflow_path", None) or None,
             node_mapping={
                 "clean_image_node": snap["prefs_obj"].clean_image_node,
+                "mask_image_node": snap["prefs_obj"].mask_image_node,
                 "prompt_node": snap["prefs_obj"].prompt_node,
                 "seed_node": snap["prefs_obj"].seed_node,
                 "output_node": snap["prefs_obj"].output_node,
@@ -589,30 +761,20 @@ def _run_pipeline(job, snap, bridge):
         diff_mask_png = os.path.join(out_dir, f"diff_mask_V{vi}.png")
         _save_view_diff_mask(diff_mask_png, mask)
 
-        # camera projection data (main thread)
-        cam_data = bridge.run(lambda cn=cam_name: _cam_proj_data(
-            bpy.data.objects.get(cn), bpy.data.objects.get(obj_name),
-            snap["render_resolution"]))
-        view = cam_data["view"]; cam_loc = cam_data["cam_loc"]
-        lens = cam_data["lens"]; sensor_w = cam_data["sensor_w"]
         # record for replay: the exact projection used for this view's mask
         view_records.append({
             "index": vi,
             "clean": os.path.basename(clean_png),
             "worn": os.path.basename(worn_canon),
             "mask": os.path.basename(diff_mask_png),
+            "inpaint_mask": (os.path.basename(inpaint_mask_png)
+                             if inpaint_mask_png else None),
             "view": [list(map(float, row)) for row in np.asarray(view).tolist()],
             "cam_loc": [float(x) for x in np.asarray(cam_loc).ravel().tolist()],
             "lens": float(lens), "sensor_w": float(sensor_w),
             "radius": float(cam_data["radius"]),
             "confidence": float(conf),
         })
-        rx = ry = snap["render_resolution"]
-
-        # software z-buffer (worker numpy)
-        depth_buf, _cov = projection.rasterize_screen_depth(
-            uvfield.vpos, uvfield.tri_vert, view, lens, sensor_w, rx, ry)
-
         # accumulate (worker numpy)
         projection.accumulate_view(
             acc_mask, acc_w, count, texel_pos, texel_norm, valid_idx,
@@ -671,9 +833,13 @@ def _run_pipeline(job, snap, bridge):
 
     # 5. Geometry priors
     job.message = "Computing geometry priors…"; job.progress = 0.64
-    convexity = bridge.run(lambda: geometry_prior.signed_convexity(
-        bpy.data.objects.get(obj_name)))
-    exposure = geometry_prior.normalize_exposure(exposure_count, n_views)
+    if snap.get("use_geometry_prior", True):
+        convexity = bridge.run(lambda: geometry_prior.signed_convexity(
+            bpy.data.objects.get(obj_name)))
+        exposure = geometry_prior.normalize_exposure(exposure_count, n_views)
+    else:
+        convexity = np.zeros(len(uvfield.vpos), dtype=np.float32)
+        exposure = np.zeros(len(uvfield.vpos), dtype=np.float32)
     adj_world = bridge.run(lambda: wear_growth.build_topology_graph(
         bpy.data.objects.get(obj_name)))
     adj, world = adj_world
@@ -681,34 +847,45 @@ def _run_pipeline(job, snap, bridge):
     # 6. WearTime
     _check_cancel(job)
     job.message = "Growing WearTime topology field…"; job.progress = 0.70
-    wt = wear_growth.build_weartime_from_graph(
-        uvfield, ai_field, convexity, exposure, adj, world,
-        snap["weights"], snap["gamma"], snap["alpha"],
-        snap["noise_amp"], snap["noise_scale"], snap["use_barrier"],
-        snap["mat_penalty"], base_seed, float(np.linalg.norm(world.max(0)-world.min(0))))
+    effective_weights = _effective_weights(snap)
+    if snap.get("use_topology_growth", True):
+        wt = wear_growth.build_weartime_from_graph(
+            uvfield, ai_field, convexity, exposure, adj, world,
+            effective_weights, snap["gamma"], snap["alpha"],
+            snap["noise_amp"], snap["noise_scale"], snap["use_barrier"],
+            snap["mat_penalty"], base_seed,
+            float(np.linalg.norm(world.max(0)-world.min(0))))
+    else:
+        wt = wear_growth.build_direct_weartime(
+            uvfield, ai_field, convexity, exposure, effective_weights,
+            snap["noise_amp"], snap["noise_scale"], base_seed, world)
     weartime_uv = wt["weartime_uv"]
+    weartime_before_post = weartime_uv.copy()
 
-    # 7. Seam fusion + dilation (worker numpy after registry build on main)
+    # 7. Seam fusion and island padding are independent ablation switches.
     if snap["seam_fuse"]:
-        job.message = "Fusing seams + padding…"; job.progress = 0.82
+        job.message = "Fusing UV seams…"; job.progress = 0.80
         registry = bridge.run(lambda: seam_registry.build_seam_registry(
             bpy.data.objects.get(obj_name), layer_name))
         qa_before = seam_registry.seam_qa(weartime_uv, registry, res)
         weartime_uv = seam_registry.fuse_seam(weartime_uv, registry, res, snap["seam_diffuse"])
-        weartime_uv, _valid2 = seam_registry.dilate(weartime_uv, uvfield.valid, snap["padding"])
-        # Fuse the encoded color residual too (same seam registry, per-channel).
         worn_uv = seam_registry.fuse_seam_rgb(worn_uv, registry, res, snap["seam_diffuse"])
-        worn_uv, _rgb_valid2 = seam_registry.dilate_rgb(
-            worn_uv, rgb_valid, snap["padding"])
         wear_alpha = seam_registry.fuse_seam(
             wear_alpha, registry, res, snap["seam_diffuse"])
-        wear_alpha, _wear_valid2 = seam_registry.dilate(
-            wear_alpha, rgb_valid, snap["padding"])
-        qa_after = seam_registry.seam_qa(weartime_uv, registry, res)
         job.meta["seam_before_p95"] = qa_before["p95"]
-        job.meta["seam_after_p95"] = qa_after["p95"]
         bridge.run(lambda: seam_registry.visualize_seams(
             bpy.data.objects.get(obj_name), registry))
+    if snap.get("use_padding", True) and snap["padding"] > 0:
+        job.message = "Padding UV islands…"; job.progress = 0.84
+        weartime_uv, _valid2 = seam_registry.dilate(
+            weartime_uv, uvfield.valid, snap["padding"])
+        worn_uv, _rgb_valid2 = seam_registry.dilate_rgb(
+            worn_uv, rgb_valid, snap["padding"])
+        wear_alpha, _wear_valid2 = seam_registry.dilate(
+            wear_alpha, rgb_valid, snap["padding"])
+    if snap["seam_fuse"]:
+        qa_after = seam_registry.seam_qa(weartime_uv, registry, res)
+        job.meta["seam_after_p95"] = qa_after["p95"]
 
     # 8. Bake WearTime to image + attach shader (main thread)
     job.state = JobState.BAKE; job.message = "Baking WearTime texture…"; job.progress = 0.90
@@ -786,6 +963,11 @@ def _run_pipeline(job, snap, bridge):
     job.meta["worn_views"] = worn_paths
     job.meta["diff_masks"] = [os.path.join(out_dir, f"diff_mask_V{i}.png")
                               for i in range(n_views)]
+    if snap.get("save_experiment_snapshot", False):
+        exp_dir = _save_experiment_bundle(
+            cache_dir, snap, job, fmt, n_views, ai_field,
+            weartime_before_post, weartime_uv, replayed=False)
+        job.meta["experiment_dir"] = exp_dir
     job.state = JobState.DONE
     job.stage = JobStage.EXPORT
     job.progress = 1.0
@@ -881,6 +1063,7 @@ def _run_replay(job, snap, bridge):
     acc_rgb_w = np.zeros(res * res, dtype=np.float32)
     exposure_count = np.zeros(len(uvfield.vpos), dtype=np.float32)
     n_views = len(view_records)
+    job.meta["effective_view_count"] = n_views
 
     # per-view mask extraction + accumulation, using the SAVED camera matrices
     for i, rec in enumerate(view_records):
@@ -939,9 +1122,13 @@ def _run_replay(job, snap, bridge):
 
     # Geometry priors
     job.message = "Replay: computing geometry priors…"; job.progress = 0.66
-    convexity = bridge.run(lambda: geometry_prior.signed_convexity(
-        bpy.data.objects.get(obj_name)))
-    exposure = geometry_prior.normalize_exposure(exposure_count, n_views)
+    if snap.get("use_geometry_prior", True):
+        convexity = bridge.run(lambda: geometry_prior.signed_convexity(
+            bpy.data.objects.get(obj_name)))
+        exposure = geometry_prior.normalize_exposure(exposure_count, n_views)
+    else:
+        convexity = np.zeros(len(uvfield.vpos), dtype=np.float32)
+        exposure = np.zeros(len(uvfield.vpos), dtype=np.float32)
     adj, world = bridge.run(lambda: wear_growth.build_topology_graph(
         bpy.data.objects.get(obj_name)))
 
@@ -949,34 +1136,45 @@ def _run_replay(job, snap, bridge):
     _check_cancel(job)
     job.message = "Replay: growing WearTime field…"; job.progress = 0.72
     base_seed = snap["seed"] if (snap["seed"] and snap["lock_seed"]) else 0
-    wt = wear_growth.build_weartime_from_graph(
-        uvfield, ai_field, convexity, exposure, adj, world,
-        snap["weights"], snap["gamma"], snap["alpha"],
-        snap["noise_amp"], snap["noise_scale"], snap["use_barrier"],
-        snap["mat_penalty"], base_seed, float(np.linalg.norm(world.max(0)-world.min(0))))
+    effective_weights = _effective_weights(snap)
+    if snap.get("use_topology_growth", True):
+        wt = wear_growth.build_weartime_from_graph(
+            uvfield, ai_field, convexity, exposure, adj, world,
+            effective_weights, snap["gamma"], snap["alpha"],
+            snap["noise_amp"], snap["noise_scale"], snap["use_barrier"],
+            snap["mat_penalty"], base_seed,
+            float(np.linalg.norm(world.max(0)-world.min(0))))
+    else:
+        wt = wear_growth.build_direct_weartime(
+            uvfield, ai_field, convexity, exposure, effective_weights,
+            snap["noise_amp"], snap["noise_scale"], base_seed, world)
     weartime_uv = wt["weartime_uv"]
+    weartime_before_post = weartime_uv.copy()
 
-    # Seam fusion + dilation
+    # Seam fusion and island padding are independent ablation switches.
     if snap["seam_fuse"]:
-        job.message = "Replay: fusing seams + padding…"; job.progress = 0.84
+        job.message = "Replay: fusing seams…"; job.progress = 0.82
         registry = bridge.run(lambda: seam_registry.build_seam_registry(
             bpy.data.objects.get(obj_name), layer_name))
         qa_before = seam_registry.seam_qa(weartime_uv, registry, res)
         weartime_uv = seam_registry.fuse_seam(weartime_uv, registry, res, snap["seam_diffuse"])
-        weartime_uv, _valid2 = seam_registry.dilate(weartime_uv, uvfield.valid, snap["padding"])
-        # Fuse the encoded color residual too (same seam registry, per-channel).
         worn_uv = seam_registry.fuse_seam_rgb(worn_uv, registry, res, snap["seam_diffuse"])
-        worn_uv, _rgb_valid2 = seam_registry.dilate_rgb(
-            worn_uv, rgb_valid, snap["padding"])
         wear_alpha = seam_registry.fuse_seam(
             wear_alpha, registry, res, snap["seam_diffuse"])
-        wear_alpha, _wear_valid2 = seam_registry.dilate(
-            wear_alpha, rgb_valid, snap["padding"])
-        qa_after = seam_registry.seam_qa(weartime_uv, registry, res)
         job.meta["seam_before_p95"] = qa_before["p95"]
-        job.meta["seam_after_p95"] = qa_after["p95"]
         bridge.run(lambda: seam_registry.visualize_seams(
             bpy.data.objects.get(obj_name), registry))
+    if snap.get("use_padding", True) and snap["padding"] > 0:
+        job.message = "Replay: padding UV islands…"; job.progress = 0.86
+        weartime_uv, _valid2 = seam_registry.dilate(
+            weartime_uv, uvfield.valid, snap["padding"])
+        worn_uv, _rgb_valid2 = seam_registry.dilate_rgb(
+            worn_uv, rgb_valid, snap["padding"])
+        wear_alpha, _wear_valid2 = seam_registry.dilate(
+            wear_alpha, rgb_valid, snap["padding"])
+    if snap["seam_fuse"]:
+        qa_after = seam_registry.seam_qa(weartime_uv, registry, res)
+        job.meta["seam_after_p95"] = qa_after["p95"]
 
     # Bake + attach shader
     job.state = JobState.BAKE; job.message = "Replay: baking WearTime…"; job.progress = 0.92
@@ -1031,6 +1229,11 @@ def _run_replay(job, snap, bridge):
     job.meta["worn_tex_path"] = worn_tex_path
     job.meta["worn_mask_path"] = mask_path
     job.meta["replayed"] = True
+    if snap.get("save_experiment_snapshot", False):
+        exp_dir = _save_experiment_bundle(
+            cache_dir, snap, job, fmt, n_views, ai_field,
+            weartime_before_post, weartime_uv, replayed=True)
+        job.meta["experiment_dir"] = exp_dir
     job.state = JobState.DONE
     job.stage = JobStage.EXPORT
     job.progress = 1.0

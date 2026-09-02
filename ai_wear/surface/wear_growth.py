@@ -235,6 +235,32 @@ def build_weartime_from_graph(uvfield, ai_field_uv: np.ndarray, convexity: np.nd
     }
 
 
+def build_direct_weartime(uvfield, ai_field_uv: np.ndarray, convexity: np.ndarray,
+                          exposure: np.ndarray, weights: dict,
+                          noise_amp: float, noise_scale: float,
+                          seed: int, world: np.ndarray) -> dict:
+    """Ablation path without Dijkstra/topology propagation.
+
+    Propensity is evaluated at vertices and converted directly to arrival time.
+    The return schema matches ``build_weartime_from_graph`` so every downstream
+    bake/shader/export stage remains identical.
+    """
+    from .geometry_prior import compute_propensity
+
+    ai_vertex = transfer_uv_to_vertex(uvfield, ai_field_uv)
+    propensity = compute_propensity(ai_vertex, convexity, exposure, weights)
+    noise = value_noise_3d(world, noise_scale, int(seed)) * 2.0 - 1.0
+    vertex_time = np.clip(1.0 - propensity + noise_amp * noise, 0.0, 1.0).astype(np.float32)
+    return {
+        "weartime_vertex": vertex_time,
+        "weartime_uv": bake_vertex_to_uv(uvfield, vertex_time),
+        "propensity": propensity,
+        "ai_vertex": ai_vertex,
+        "seeds": [],
+        "arrival_distance": np.zeros_like(vertex_time),
+    }
+
+
 def build_weartime(obj, uvfield, ai_field_uv: np.ndarray, convexity: np.ndarray,
                    exposure: np.ndarray, weights: dict, gamma: float, alpha: float,
                    noise_amp: float, noise_scale: float, use_barrier: bool,

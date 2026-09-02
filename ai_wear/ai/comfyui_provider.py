@@ -1,7 +1,7 @@
 """ComfyUI provider.
 
-Loads an API-format workflow JSON, wires the configured input nodes (clean
-image / prompt / seed), queues it via /prompt, polls /history until the run
+Loads an API-format workflow JSON, validates every graph reference, wires the
+configured input nodes (clean image / inpaint mask / prompt / seed), queues it via /prompt, polls /history until the run
 finishes, then downloads the configured output node's image via /view.
 
 Changing the workflow never requires a code change — only the node-id mapping
@@ -38,8 +38,15 @@ class ComfyUIProvider(AIProvider):
         probs = []
         if not prefs.comfyui_url:
             probs.append("ComfyUI URL is empty")
-        if not prefs.workflow_path or not os.path.exists(bpy_abspath(prefs.workflow_path)):
+        path = bpy_abspath(prefs.workflow_path) if prefs.workflow_path else ""
+        if not path or not os.path.exists(path):
             probs.append("Workflow JSON path is invalid or missing")
+        else:
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    self._validate_api_workflow(json.load(f), prefs)
+            except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                probs.append(f"Workflow JSON is invalid: {exc}")
         return probs
 
     # --- helpers ----------------------------------------------------------
@@ -71,9 +78,43 @@ class ComfyUIProvider(AIProvider):
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
 
+    @staticmethod
+    def _validate_api_workflow(wf: dict, prefs=None) -> None:
+        """Validate the executable/API graph before uploading any images."""
+        if not isinstance(wf, dict):
+            raise ValueError("top level must be an object")
+        if "nodes" in wf and "links" in wf:
+            raise ValueError(
+                "this is a UI workflow; select aiwear_inpaint_api.json in Blender "
+                "(the *_workflow.json file is for importing into ComfyUI/Liblib)")
+        if "prompt" in wf and isinstance(wf["prompt"], dict):
+            wf = wf["prompt"]
+        if not wf:
+            raise ValueError("workflow has no nodes")
+        node_ids = {str(k) for k in wf}
+        for nid, node in wf.items():
+            if not isinstance(node, dict) or not node.get("class_type"):
+                raise ValueError(f"node {nid} has no class_type")
+            inputs = node.get("inputs", {})
+            if not isinstance(inputs, dict):
+                raise ValueError(f"node {nid} inputs must be an object")
+            for name, value in inputs.items():
+                if (isinstance(value, list) and len(value) == 2
+                        and isinstance(value[1], int)):
+                    if str(value[0]) not in node_ids:
+                        raise ValueError(
+                            f"node {nid}.{name} references missing node {value[0]}")
+        if prefs is not None:
+            for attr in ("clean_image_node", "mask_image_node", "prompt_node",
+                         "seed_node", "output_node"):
+                mapped = str(getattr(prefs, attr, "") or "")
+                if mapped and mapped not in node_ids:
+                    raise ValueError(f"{attr} maps to missing node {mapped}")
+
     def _wire_inputs(self, wf: dict, req: GenRequest, prefs) -> Tuple[str, Optional[str]]:
         """Wire clean image / prompt / seed nodes. Returns (output_node_id or None)."""
         clean_node = prefs.clean_image_node
+        mask_node = getattr(prefs, "mask_image_node", "")
         prompt_node = prefs.prompt_node
         seed_node = prefs.seed_node
         out_node = prefs.output_node
@@ -95,6 +136,18 @@ class ComfyUIProvider(AIProvider):
         clean_filename = self._upload_image(prefs, req.clean_image_path)
         if clean_node and clean_node in wf:
             wf[clean_node].setdefault("inputs", {})["image"] = clean_filename
+
+        if req.mask_path and os.path.exists(req.mask_path):
+            if not mask_node:
+                # The first LoadImage after the clean node is the conventional
+                # mask input in the bundled graph.
+                mask_node = next((nid for nid, node in wf.items()
+                                  if nid != clean_node
+                                  and isinstance(node, dict)
+                                  and node.get("class_type") == "LoadImage"), "")
+            if mask_node and mask_node in wf:
+                mask_filename = self._upload_image(prefs, req.mask_path)
+                wf[mask_node].setdefault("inputs", {})["image"] = mask_filename
 
         if prompt_node and prompt_node in wf:
             wf[prompt_node].setdefault("inputs", {})["text"] = req.prompt
@@ -178,6 +231,9 @@ class ComfyUIProvider(AIProvider):
         if not prefs.workflow_path or not os.path.exists(bpy_abspath(prefs.workflow_path)):
             raise ProviderError("ComfyUI workflow path not set", kind="CONFIG")
         wf = self._load_workflow(prefs)
+        if "prompt" in wf and isinstance(wf["prompt"], dict):
+            wf = wf["prompt"]
+        self._validate_api_workflow(wf, prefs)
         out_node = self._wire_inputs(wf, req, prefs)
         req.on_progress(0.2, "Queuing ComfyUI job…")
         prompt_id = self._queue(prefs, wf)

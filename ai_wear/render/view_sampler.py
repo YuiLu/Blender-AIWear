@@ -69,6 +69,19 @@ def _equator_dirs(n: int) -> List[Vector]:
     return out
 
 
+def _fibonacci_dirs(n: int) -> List[Vector]:
+    """Approximately uniform sphere directions for exact-count experiments."""
+    n = max(1, int(n))
+    golden = math.pi * (3.0 - math.sqrt(5.0))
+    out = []
+    for i in range(n):
+        z = 1.0 - 2.0 * ((i + 0.5) / n)
+        radius = math.sqrt(max(0.0, 1.0 - z * z))
+        phi = i * golden
+        out.append(Vector((radius * math.cos(phi), radius * math.sin(phi), z)))
+    return out
+
+
 def generate_views(scene, obj, preset: str, count: int,
                    depsgraph=None) -> List["bpy.types.Object"]:
     import bpy
@@ -89,6 +102,8 @@ def generate_views(scene, obj, preset: str, count: int,
         dirs.append(Vector((0, 0, -1)))
     elif preset == "TURNTABLE_4":
         dirs = _equator_dirs(4)
+    elif preset == "AUTO_COUNT":
+        dirs = _fibonacci_dirs(count)
     elif preset == "CUSTOM":
         # Use any existing camera tagged by the user (name starts with CAM_PREFIX)
         cams = [o for o in scene.objects if o.type == "CAMERA"

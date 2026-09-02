@@ -72,8 +72,13 @@ class AIWEAR_PT_capture(bpy.types.Panel):
         layout = self.layout
         s = context.scene.ai_wear
         layout.prop(s, "camera_preset")
+        if s.camera_preset in {"AUTO_COUNT", "CUSTOM"}:
+            layout.prop(s, "camera_count")
         layout.prop(s, "render_resolution")
         layout.prop(s, "coverage_target")
+        layout.prop(s, "use_comfy_inpaint")
+        if s.use_comfy_inpaint:
+            layout.prop(s, "inpaint_edge_width")
 
 
 class AIWEAR_PT_prompt(bpy.types.Panel):
@@ -131,8 +136,30 @@ class AIWEAR_PT_seam(bpy.types.Panel):
         layout = self.layout
         s = context.scene.ai_wear
         layout.prop(s, "seam_fuse")
-        layout.prop(s, "seam_diffuse_texels")
-        layout.prop(s, "padding_texels")
+        if s.seam_fuse:
+            layout.prop(s, "seam_diffuse_texels")
+        layout.prop(s, "use_padding")
+        if s.use_padding:
+            layout.prop(s, "padding_texels")
+
+
+class AIWEAR_PT_experiments(bpy.types.Panel):
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "AI Wear"
+    bl_label = "Experiments / Ablation"
+    bl_parent_id = "AIWEAR_PT_main"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw(self, context):
+        layout = self.layout
+        s = context.scene.ai_wear
+        layout.prop(s, "use_ai_evidence")
+        layout.prop(s, "use_geometry_prior")
+        layout.prop(s, "use_topology_growth")
+        layout.prop(s, "save_experiment_snapshot")
+        if s.save_experiment_snapshot:
+            layout.prop(s, "experiment_label")
 
 
 class AIWEAR_PT_export(bpy.types.Panel):
@@ -179,6 +206,7 @@ CLASSES = (
     AIWEAR_PT_prompt,
     AIWEAR_PT_weartime,
     AIWEAR_PT_seam,
+    AIWEAR_PT_experiments,
     AIWEAR_PT_export,
     AIWEAR_PT_presets,
 )

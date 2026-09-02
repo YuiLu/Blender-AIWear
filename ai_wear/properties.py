@@ -32,6 +32,7 @@ CAMERA_PRESET_ITEMS = (
     ("AUTO_6", "Auto 6 views", "6 coverage cameras around the model"),
     ("AUTO_8", "Auto 8 views", "8 coverage cameras (denser top/bottom)"),
     ("TURNTABLE_4", "Turntable 4", "4 equatorial views + 1 top (fast preview)"),
+    ("AUTO_COUNT", "Counted Auto", "Generate exactly Cam Count evenly distributed views"),
     ("CUSTOM", "Custom", "Use the cameras currently marked in the scene"),
 )
 
@@ -165,11 +166,39 @@ class AIWearSceneSettings(PropertyGroup):
     coverage_target: FloatProperty(name="Coverage Target", default=0.95, min=0.5, max=1.0,
                                    description="Stop adding views once this surface fraction is covered")
 
+    # --- ComfyUI inpaint --------------------------------------------------
+    use_comfy_inpaint: BoolProperty(
+        name="Geometry Inpaint Mask", default=True,
+        description="For ComfyUI, generate an object-silhouette/depth-edge mask and restrict regeneration to likely wear zones")
+    inpaint_edge_width: IntProperty(
+        name="Inpaint Edge Width", default=12, min=1, max=64,
+        description="Screen-space width in pixels of the generated wear/inpaint bands")
+
     # --- Seam / bake ------------------------------------------------------
     seam_fuse: BoolProperty(name="Seam Fusion", default=True)
     seam_diffuse_texels: IntProperty(name="Seam Diffuse", default=8, min=0, max=64)
+    use_padding: BoolProperty(
+        name="Island Padding", default=True,
+        description="Dilate valid UV islands after projection; independent of seam fusion for ablation")
     padding_texels: IntProperty(name="Padding", default=16, min=0, max=64,
                                  description="Island dilation to prevent bilinear/mipmap bleed")
+
+    # --- Experiments / ablation ------------------------------------------
+    use_ai_evidence: BoolProperty(
+        name="AI Evidence", default=True,
+        description="Include the reprojected AI difference field in wear propensity")
+    use_geometry_prior: BoolProperty(
+        name="Geometry Prior", default=True,
+        description="Include convexity, exposure and cavity terms in wear propensity")
+    use_topology_growth: BoolProperty(
+        name="Topology Growth", default=True,
+        description="Use multi-source Dijkstra growth; disabled uses direct propensity and still completes")
+    save_experiment_snapshot: BoolProperty(
+        name="Save Experiment Snapshot", default=False,
+        description="Save config, metrics and pre/post seam textures into a uniquely named experiment folder")
+    experiment_label: StringProperty(
+        name="Experiment Label", default="baseline",
+        description="Short label used in the experiment output directory")
 
     # --- Export -----------------------------------------------------------
     export_format: EnumProperty(items=EXPORT_ITEMS, name="Export", default="PNG16")

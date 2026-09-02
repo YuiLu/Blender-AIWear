@@ -129,28 +129,33 @@ class AIWearPreferences(AddonPreferences):
     workflow_path: StringProperty(
         name="Workflow JSON",
         description="Path to a ComfyUI workflow (API-format JSON) with input/output node mapping",
-        default="",
+        default=os.path.join(os.path.dirname(__file__), "workflows", "aiwear_inpaint_api.json"),
         subtype="FILE_PATH",
     )
     clean_image_node: StringProperty(
         name="Clean Image Node",
         description="ComfyUI node id that receives the clean view image",
-        default="",
+        default="2",
+    )
+    mask_image_node: StringProperty(
+        name="Inpaint Mask Node",
+        description="ComfyUI LoadImage node id that receives the RGBA geometry inpaint mask",
+        default="3",
     )
     prompt_node: StringProperty(
         name="Prompt Node",
         description="ComfyUI node id that receives the text prompt",
-        default="",
+        default="4",
     )
     seed_node: StringProperty(
         name="Seed Node",
         description="ComfyUI node id that receives the seed",
-        default="",
+        default="7",
     )
     output_node: StringProperty(
         name="Output Node",
         description="ComfyUI SaveImage / PreviewImage node id to fetch results from",
-        default="",
+        default="10",
     )
 
     # --- Transport / limits ------------------------------------------------
@@ -219,6 +224,7 @@ class AIWearPreferences(AddonPreferences):
             cbox.prop(self, "comfyui_url")
             cbox.prop(self, "workflow_path")
             cbox.prop(self, "clean_image_node")
+            cbox.prop(self, "mask_image_node")
             cbox.prop(self, "prompt_node")
             cbox.prop(self, "seed_node")
             cbox.prop(self, "output_node")

@@ -1,0 +1,89 @@
+{
+  "1": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {
+      "ckpt_name": "512-inpainting-ema.safetensors"
+    },
+    "_meta": {"title": "Inpaint Checkpoint"}
+  },
+  "2": {
+    "class_type": "LoadImage",
+    "inputs": {"image": "aiwear_clean.png"},
+    "_meta": {"title": "AIWear Clean View"}
+  },
+  "3": {
+    "class_type": "LoadImage",
+    "inputs": {"image": "aiwear_inpaint_mask.png"},
+    "_meta": {"title": "AIWear Geometry Mask"}
+  },
+  "4": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "realistic edge wear, chipped paint and fine scratches on convex ridges and contact areas; preserve geometry, silhouette, camera, material identity and lighting",
+      "clip": ["1", 1]
+    },
+    "_meta": {"title": "AIWear Positive Prompt"}
+  },
+  "5": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "changed geometry, changed silhouette, changed camera, changed background, changed logo, text artifacts, large white patches, overexposure, blur, low detail",
+      "clip": ["1", 1]
+    },
+    "_meta": {"title": "Negative Prompt"}
+  },
+  "6": {
+    "class_type": "VAEEncodeForInpaint",
+    "inputs": {
+      "pixels": ["2", 0],
+      "vae": ["1", 2],
+      "mask": ["3", 1],
+      "grow_mask_by": 8
+    },
+    "_meta": {"title": "Encode Local Wear Region"}
+  },
+  "7": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": 1,
+      "steps": 24,
+      "cfg": 6.5,
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "karras",
+      "denoise": 0.82,
+      "model": ["1", 0],
+      "positive": ["4", 0],
+      "negative": ["5", 0],
+      "latent_image": ["6", 0]
+    },
+    "_meta": {"title": "AIWear Inpaint Sampler"}
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["7", 0],
+      "vae": ["1", 2]
+    },
+    "_meta": {"title": "Decode Worn View"}
+  },
+  "9": {
+    "class_type": "ImageCompositeMasked",
+    "inputs": {
+      "destination": ["2", 0],
+      "source": ["8", 0],
+      "x": 0,
+      "y": 0,
+      "resize_source": false,
+      "mask": ["3", 1]
+    },
+    "_meta": {"title": "Preserve Pixels Outside Mask"}
+  },
+  "10": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "AIWear/worn",
+      "images": ["9", 0]
+    },
+    "_meta": {"title": "AIWear Output"}
+  }
+}

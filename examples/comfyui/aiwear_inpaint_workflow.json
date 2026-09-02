@@ -1,0 +1,137 @@
+{
+  "id": "c59682be-c044-49d4-8720-8be3ae675f23",
+  "revision": 0,
+  "last_node_id": 10,
+  "last_link_id": 15,
+  "nodes": [
+    {
+      "id": 1, "type": "CheckpointLoaderSimple", "pos": [-720, 20], "size": [315, 98],
+      "flags": {}, "order": 0, "mode": 0, "inputs": [],
+      "outputs": [
+        {"name": "MODEL", "type": "MODEL", "slot_index": 0, "links": [1]},
+        {"name": "CLIP", "type": "CLIP", "slot_index": 1, "links": [2, 3]},
+        {"name": "VAE", "type": "VAE", "slot_index": 2, "links": [4, 5]}
+      ],
+      "title": "1. Select an available inpaint checkpoint",
+      "properties": {"Node name for S&R": "CheckpointLoaderSimple", "cnr_id": "comfy-core"},
+      "widgets_values": ["512-inpainting-ema.safetensors"]
+    },
+    {
+      "id": 2, "type": "LoadImage", "pos": [-720, 180], "size": [315, 314],
+      "flags": {}, "order": 1, "mode": 0, "inputs": [],
+      "outputs": [
+        {"name": "IMAGE", "type": "IMAGE", "slot_index": 0, "links": [6, 12]},
+        {"name": "MASK", "type": "MASK", "slot_index": 1, "links": null}
+      ],
+      "title": "2. AIWear Clean View",
+      "properties": {"Node name for S&R": "LoadImage", "cnr_id": "comfy-core"},
+      "widgets_values": ["aiwear_clean.png", "image"]
+    },
+    {
+      "id": 3, "type": "LoadImage", "pos": [-720, 540], "size": [315, 314],
+      "flags": {}, "order": 2, "mode": 0, "inputs": [],
+      "outputs": [
+        {"name": "IMAGE", "type": "IMAGE", "slot_index": 0, "links": null},
+        {"name": "MASK", "type": "MASK", "slot_index": 1, "links": [7, 14]}
+      ],
+      "title": "3. Geometry Inpaint Mask (alpha)",
+      "properties": {"Node name for S&R": "LoadImage", "cnr_id": "comfy-core"},
+      "widgets_values": ["aiwear_inpaint_mask.png", "image"]
+    },
+    {
+      "id": 4, "type": "CLIPTextEncode", "pos": [-340, 20], "size": [430, 180],
+      "flags": {}, "order": 3, "mode": 0,
+      "inputs": [{"name": "clip", "type": "CLIP", "link": 2}],
+      "outputs": [{"name": "CONDITIONING", "type": "CONDITIONING", "slot_index": 0, "links": [8]}],
+      "title": "4. AIWear Positive Prompt",
+      "properties": {"Node name for S&R": "CLIPTextEncode", "cnr_id": "comfy-core"},
+      "widgets_values": ["realistic edge wear, chipped paint and fine scratches on convex ridges and contact areas; preserve geometry, silhouette, camera, material identity and lighting"]
+    },
+    {
+      "id": 5, "type": "CLIPTextEncode", "pos": [-340, 240], "size": [430, 180],
+      "flags": {}, "order": 4, "mode": 0,
+      "inputs": [{"name": "clip", "type": "CLIP", "link": 3}],
+      "outputs": [{"name": "CONDITIONING", "type": "CONDITIONING", "slot_index": 0, "links": [9]}],
+      "title": "5. Negative Prompt",
+      "properties": {"Node name for S&R": "CLIPTextEncode", "cnr_id": "comfy-core"},
+      "widgets_values": ["changed geometry, changed silhouette, changed camera, changed background, changed logo, text artifacts, large white patches, overexposure, blur, low detail"]
+    },
+    {
+      "id": 6, "type": "VAEEncodeForInpaint", "pos": [-300, 520], "size": [260, 110],
+      "flags": {}, "order": 5, "mode": 0,
+      "inputs": [
+        {"name": "pixels", "type": "IMAGE", "link": 6},
+        {"name": "vae", "type": "VAE", "link": 4},
+        {"name": "mask", "type": "MASK", "link": 7}
+      ],
+      "outputs": [{"name": "LATENT", "type": "LATENT", "slot_index": 0, "links": [10]}],
+      "title": "6. Encode Local Wear Region",
+      "properties": {"Node name for S&R": "VAEEncodeForInpaint", "cnr_id": "comfy-core"},
+      "widgets_values": [8]
+    },
+    {
+      "id": 7, "type": "KSampler", "pos": [160, 100], "size": [315, 262],
+      "flags": {}, "order": 6, "mode": 0,
+      "inputs": [
+        {"name": "model", "type": "MODEL", "link": 1},
+        {"name": "positive", "type": "CONDITIONING", "link": 8},
+        {"name": "negative", "type": "CONDITIONING", "link": 9},
+        {"name": "latent_image", "type": "LATENT", "link": 10}
+      ],
+      "outputs": [{"name": "LATENT", "type": "LATENT", "slot_index": 0, "links": [11]}],
+      "title": "7. AIWear Inpaint Sampler",
+      "properties": {"Node name for S&R": "KSampler", "cnr_id": "comfy-core"},
+      "widgets_values": [1, "fixed", 24, 6.5, "dpmpp_2m", "karras", 0.82]
+    },
+    {
+      "id": 8, "type": "VAEDecode", "pos": [540, 100], "size": [210, 46],
+      "flags": {}, "order": 7, "mode": 0,
+      "inputs": [
+        {"name": "samples", "type": "LATENT", "link": 11},
+        {"name": "vae", "type": "VAE", "link": 5}
+      ],
+      "outputs": [{"name": "IMAGE", "type": "IMAGE", "slot_index": 0, "links": [13]}],
+      "title": "8. Decode Worn View",
+      "properties": {"Node name for S&R": "VAEDecode", "cnr_id": "comfy-core"},
+      "widgets_values": []
+    },
+    {
+      "id": 9, "type": "ImageCompositeMasked", "pos": [800, 160], "size": [280, 150],
+      "flags": {}, "order": 8, "mode": 0,
+      "inputs": [
+        {"name": "destination", "type": "IMAGE", "link": 12},
+        {"name": "source", "type": "IMAGE", "link": 13},
+        {"name": "mask", "type": "MASK", "link": 14}
+      ],
+      "outputs": [{"name": "IMAGE", "type": "IMAGE", "slot_index": 0, "links": [15]}],
+      "title": "9. Preserve Pixels Outside Mask",
+      "properties": {"Node name for S&R": "ImageCompositeMasked", "cnr_id": "comfy-core"},
+      "widgets_values": [0, 0, false]
+    },
+    {
+      "id": 10, "type": "SaveImage", "pos": [1130, 100], "size": [420, 450],
+      "flags": {}, "order": 9, "mode": 0,
+      "inputs": [{"name": "images", "type": "IMAGE", "link": 15}],
+      "outputs": [], "title": "10. AIWear Output",
+      "properties": {"Node name for S&R": "SaveImage", "cnr_id": "comfy-core"},
+      "widgets_values": ["AIWear/worn"]
+    }
+  ],
+  "links": [
+    [1, 1, 0, 7, 0, "MODEL"], [2, 1, 1, 4, 0, "CLIP"],
+    [3, 1, 1, 5, 0, "CLIP"], [4, 1, 2, 6, 1, "VAE"],
+    [5, 1, 2, 8, 1, "VAE"], [6, 2, 0, 6, 0, "IMAGE"],
+    [7, 3, 1, 6, 2, "MASK"], [8, 4, 0, 7, 1, "CONDITIONING"],
+    [9, 5, 0, 7, 2, "CONDITIONING"], [10, 6, 0, 7, 3, "LATENT"],
+    [11, 7, 0, 8, 0, "LATENT"], [12, 2, 0, 9, 0, "IMAGE"],
+    [13, 8, 0, 9, 1, "IMAGE"], [14, 3, 1, 9, 2, "MASK"],
+    [15, 9, 0, 10, 0, "IMAGE"]
+  ],
+  "groups": [
+    {"id": 1, "title": "Blender Inputs", "bounding": [-750, 150, 370, 730], "color": "#3f789e", "font_size": 24},
+    {"id": 2, "title": "Local Wear Inpaint", "bounding": [-370, -10, 1490, 590], "color": "#8a6d3b", "font_size": 24}
+  ],
+  "config": {},
+  "extra": {"frontendVersion": "1.25.11"},
+  "version": 0.4
+}
