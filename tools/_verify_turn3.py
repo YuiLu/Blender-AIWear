@@ -71,20 +71,28 @@ try:
     mat = bpy.data.materials.new("verify_mat")
     mat.use_nodes = True
     obj.data.materials.append(mat)  # slot 0 (new material has a Principled BSDF)
-    out_mat = wear_nodegroup.attach_wear_overlay(obj, wt_img, worn_img)
-    mlocs = [tuple(n.location) for n in out_mat.node_tree.nodes]
-    if all(l == (0.0, 0.0) for l in mlocs):
-        errors.append("overlay material nodes all at (0,0)")
-    names = {n.name for n in out_mat.node_tree.nodes}
-    if wear_nodegroup.OVERLAY_MIX not in names:
-        errors.append("overlay mix node missing")
-    if wear_nodegroup.MASKGROUP_NODE not in names:
-        errors.append("mask group node missing")
+    out_mats = wear_nodegroup.attach_wear_overlay(obj, wt_img, worn_img)
+    if not out_mats:
+        errors.append("attach_wear_overlay returned no materials")
+    for out_mat in out_mats:
+        mlocs = [tuple(n.location) for n in out_mat.node_tree.nodes]
+        if all(l == (0.0, 0.0) for l in mlocs):
+            errors.append(f"overlay material nodes all at (0,0): {out_mat.name}")
+        names = {n.name for n in out_mat.node_tree.nodes}
+        if wear_nodegroup.OVERLAY_MIX not in names:
+            errors.append(f"overlay mix node missing: {out_mat.name}")
+        if wear_nodegroup.MASKGROUP_NODE not in names:
+            errors.append(f"mask group node missing: {out_mat.name}")
     # idempotency: re-attach must not nest a second overlay mix
     wear_nodegroup.attach_wear_overlay(obj, wt_img, worn_img)
-    mix_count = sum(1 for n in out_mat.node_tree.nodes if n.name == wear_nodegroup.OVERLAY_MIX)
-    if mix_count != 1:
-        errors.append(f"re-attach nested overlays (mix_count={mix_count})")
+    for out_mat in out_mats:
+        mix_count = sum(
+            1 for n in out_mat.node_tree.nodes
+            if n.name == wear_nodegroup.OVERLAY_MIX)
+        if mix_count != 1:
+            errors.append(
+                f"re-attach nested overlays: {out_mat.name} "
+                f"(mix_count={mix_count})")
     # cleanup
     bpy.data.objects.remove(obj, do_unlink=True)
     bpy.data.meshes.remove(mesh)

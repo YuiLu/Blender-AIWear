@@ -121,15 +121,17 @@ baseline        Topology Growth = on（完整管线共同对照）
 
 ## 实验 5：UV seam 处理前 / 后
 
-使用同一个 Replay，固定 Padding 状态，只改变 Seam Fusion：
+使用同一个 Replay，必须把“数值配对”和“岛外采样”拆开，比较四种状态：
 
 ```text
-seam_off    Seam Fusion = off, Island Padding = on
-baseline    Seam Fusion = on,  Island Padding = on
+raw             Seam Fusion = off, Island Padding = off
+fusion_only     Seam Fusion = on,  Island Padding = off
+padding_only    Seam Fusion = off, Island Padding = on
+both            Seam Fusion = on,  Island Padding = on
 ```
 
-若还要解释 padding，可额外补一张 `Seam Fusion = on, Island Padding = off`，但不必组成
-四组定量矩阵。
+只比较 `seam_off` 与 `baseline`（两组都开 Padding）无法判断改善究竟来自 Seam Fusion 还是
+Padding，也不能验证“先重投影到 mesh 再烘焙就天然无缝”这类说法。
 
 展示内容：
 
@@ -137,6 +139,8 @@ baseline    Seam Fusion = on,  Island Padding = on
 2. UV Editor 中圈出 seam 两侧；
 3. 模型上用近距离、斜视角和 Material Preview 展示接缝；
 4. 最终模型使用完全相同的 Amount 和 Feather。
+5. 对每种状态分别记录 seam mean / p95；指标应在烘焙纹理上按 seam pair 双线性采样，以包含
+   texel 中心、岛外像素和过滤造成的真实采样误差。
 
 定性观察：
 
@@ -144,6 +148,10 @@ baseline    Seam Fusion = on,  Island Padding = on
 - WornTex 颜色是否出现一边亮、一边暗；
 - 开启后接缝是否消失，同时有没有把细节扩散得过宽；
 - padding 关闭时 mipmap / 双线性采样是否在岛边漏出黑边或中性色。
+
+现有 `gaming_console` 六视图实测：raw p95 `0.07698`、fusion-only `0.02068`、padding-only
+`0.01324`、both `0.01947`。这说明当前案例的 p95 改善主要来自 Padding；Seam Fusion 降低了
+平均差异，但固定半径 stamp 的改动范围偏宽。完整解释见 README §10.5。
 
 ## 实验 6：Wear Amount 单调控制
 
