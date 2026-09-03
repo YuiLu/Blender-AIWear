@@ -17,7 +17,7 @@ ai_wear.register()
 
 s = bpy.context.scene.ai_wear
 from ai_wear import presets
-assert len(s.presets) == 18, len(s.presets)
+assert len(s.presets) == 14, len(s.presets)
 
 # auto-apply: selecting 'amount_30' should move the scene Wear Amount to 30
 idx = [p.name for p in s.presets].index("amount_30")

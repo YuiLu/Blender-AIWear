@@ -88,7 +88,7 @@ context_previous   View Context = Previous View
 
 ```text
 geometry_off    Geometry Prior = off
-geometry_on     Geometry Prior = on
+baseline        Geometry Prior = on（完整管线共同对照）
 ```
 
 其他开关保持一致。展示相同观察角度下的模型，并附 `AIWear_Mask.png`，说明 AI mask
@@ -107,7 +107,7 @@ geometry_on     Geometry Prior = on
 
 ```text
 topology_off    Topology Growth = off
-topology_on     Topology Growth = on
+baseline        Topology Growth = on（完整管线共同对照）
 ```
 
 关闭时 WearTime 直接来自 `1-P`；开启时从高 propensity 种子运行 multi-source Dijkstra。
@@ -125,7 +125,7 @@ topology_on     Topology Growth = on
 
 ```text
 seam_off    Seam Fusion = off, Island Padding = on
-seam_on     Seam Fusion = on,  Island Padding = on
+baseline    Seam Fusion = on,  Island Padding = on
 ```
 
 若还要解释 padding，可额外补一张 `Seam Fusion = on, Island Padding = off`，但不必组成
@@ -167,7 +167,7 @@ amount_100
 这组是完整 AI 实验，使用相同相机和主 prompt，只改变 `Extra Prompt`：
 
 ```text
-extra_off    Extra Prompt = （留空）
+baseline     Extra Prompt = （留空）
 extra_on     Extra Prompt = "add fine micro-scratches and edge chipping; keep large flat faces mostly clean"
 ```
 

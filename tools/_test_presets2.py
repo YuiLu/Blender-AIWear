@@ -27,9 +27,10 @@ from ai_wear import presets
 d = {p.name: p for p in s.presets}
 assert d["cams_08"].camera_preset == "AUTO_COUNT" and d["cams_08"].camera_count == 8
 assert d["geometry_off"].use_geometry_prior is False
-assert d["topology_on"].use_topology_growth is True
+assert d["topology_off"].use_topology_growth is False
 assert d["amount_30"].wear_amount == 30.0
 assert "micro-scratches" in d["extra_on"].prompt_extra
+assert not ({"geometry_on", "topology_on", "seam_on", "extra_off"} & set(d))
 print("spot-checks OK")
 
 # idempotent + restore
@@ -40,11 +41,23 @@ presets.restore_experiment_presets(s)
 assert len(s.presets) == n, "restore should reseed"
 print("idempotency/restore OK")
 
+# Migration: scenes saved by 0.3.2/0.3.3 may still contain the four redundant
+# built-ins.  A normal seed pass must remove them without clearing other rows.
+for old_name in presets.DEPRECATED_EXPERIMENT_PRESETS:
+    old = s.presets.add()
+    old.name = old_name
+assert len(s.presets) == 18
+presets.seed_experiment_presets(s)
+assert len(s.presets) == 14
+assert not (presets.DEPRECATED_EXPERIMENT_PRESETS &
+            {p.name for p in s.presets})
+print("deprecated-preset migration OK")
+
 # startup-restriction safety net: the retry timer seeds once bpy.data is writable
 s.presets.clear()
 assert len(s.presets) == 0
 assert ai_wear._seed_retry_timer() is None, "timer should stop after seeding"
-assert len(s.presets) == 18, "retry timer did not seed"
+assert len(s.presets) == 14, "retry timer did not seed"
 print("retry timer seed OK")
 
 # feather clamp (exercise the real code path with a minimal material mock)

@@ -23,7 +23,7 @@ except Exception:
     pass
 ai_wear.register()
 
-assert len(bpy.context.scene.ai_wear.presets) == 18
+assert len(bpy.context.scene.ai_wear.presets) == 14
 
 blend_path = os.path.join(
     os.path.dirname(ROOT), "..", "blender", "gaming_console_2k.blend",
@@ -34,7 +34,7 @@ assert os.path.isfile(blend_path), blend_path
 bpy.ops.wm.open_mainfile(filepath=blend_path)
 
 s = bpy.context.scene.ai_wear
-assert len(s.presets) == 18, (
+assert len(s.presets) == 14, (
     "Presets were lost when the .blend replaced the startup scene: "
     f"got {len(s.presets)}")
 assert ai_wear._seed_presets_on_load in bpy.app.handlers.load_post

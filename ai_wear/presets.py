@@ -26,26 +26,31 @@ DEFAULT_EXPERIMENT_PRESETS = (
     ("context_previous", {"view_context_mode": "PREVIOUS_VIEW"}),
     # Experiment 3: geometry prior on / off
     ("geometry_off", {"use_geometry_prior": False}),
-    ("geometry_on", {"use_geometry_prior": True}),
     # Experiment 4: topology growth on / off
     ("topology_off", {"use_topology_growth": False}),
-    ("topology_on", {"use_topology_growth": True}),
     # Experiment 5: seam fusion on / off (padding stays on)
     ("seam_off", {"seam_fuse": False}),
-    ("seam_on", {"seam_fuse": True}),
     # Experiment 6: wear amount 30 / 60 / 100
     ("amount_30", {"wear_amount": 30.0}),
     ("amount_60", {"wear_amount": 60.0}),
     ("amount_100", {"wear_amount": 100.0}),
     # Experiment 7: extra prompt with / without
-    ("extra_off", {"prompt_extra": ""}),
     ("extra_on", {"prompt_extra": "add fine micro-scratches and edge chipping; "
                                   "keep large flat faces mostly clean"}),
 )
 
+# Names shipped by 0.3.2/0.3.3 that duplicate the full-feature ``baseline``.
+# Remove them from scenes that already persisted the old 18-item collection.
+DEPRECATED_EXPERIMENT_PRESETS = frozenset((
+    "geometry_on", "topology_on", "seam_on", "extra_off",
+))
+
 
 def seed_experiment_presets(s) -> None:
     """Populate ``s.presets`` with the experiment arms (idempotent: only when empty)."""
+    for index in range(len(s.presets) - 1, -1, -1):
+        if s.presets[index].name in DEPRECATED_EXPERIMENT_PRESETS:
+            s.presets.remove(index)
     if len(s.presets) > 0:
         return
     for name, overrides in DEFAULT_EXPERIMENT_PRESETS:

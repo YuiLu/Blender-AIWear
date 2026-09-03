@@ -70,9 +70,9 @@ hero.rotation_euler = (center - hero.location).to_track_quat("-Z", "Y").to_euler
 
 cases = (
     ("geometry_off", False, True),
-    ("geometry_on", True, True),
+    ("geometry_baseline", True, True),
     ("topology_off", True, False),
-    ("topology_on", True, True),
+    ("topology_baseline", True, True),
 )
 
 results = []
