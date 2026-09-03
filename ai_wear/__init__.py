@@ -16,7 +16,7 @@ See README.md for install / config / workflow mapping.
 bl_info = {
     "name": "AI Wear Texture",
     "author": "AI Wear Texture — implementation per plan",
-    "version": (0, 3, 2),
+    "version": (0, 3, 3),
     "blender": (3, 6, 0),
     "location": "View3D > Sidebar (N) > AI Wear",
     "description": "AI-driven model wear-texture generation: UV QC, surface field, "
@@ -27,6 +27,7 @@ bl_info = {
 }
 
 import bpy
+from bpy.app.handlers import persistent
 
 from . import preferences
 from . import properties
@@ -53,7 +54,15 @@ def _seed_all_scenes():
         presets.seed_experiment_presets(scene.ai_wear)
 
 
+@persistent
 def _seed_presets_on_load(_dummy):
+    """Populate the scenes that replace Blender's temporary startup scene.
+
+    Add-ons are enabled before a project file is loaded.  Without
+    ``@persistent`` Blender removes this callback while loading that file, so
+    presets seeded into the temporary scene vanish with it and the real
+    project's Presets panel stays empty.
+    """
     _seed_all_scenes()
 
 
@@ -87,9 +96,11 @@ def register():
     # time, on every subsequent .blend load, and via a retry timer that covers
     # the startup window where bpy.data is still restricted.
     _seed_all_scenes()
-    bpy.app.handlers.load_post.append(_seed_presets_on_load)
+    if _seed_presets_on_load not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_seed_presets_on_load)
     if not bpy.app.timers.is_registered(_seed_retry_timer):
-        bpy.app.timers.register(_seed_retry_timer, first_interval=0.2)
+        bpy.app.timers.register(_seed_retry_timer, first_interval=0.2,
+                                persistent=True)
 
 
 def unregister():
