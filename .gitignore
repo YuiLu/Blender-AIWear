@@ -6,3 +6,12 @@ __pycache__/
 .ai_wear_cache/
 .DS_Store
 Thumbs.db
+
+# Sensitive exam/recruitment materials — never commit
+【必看】米哈游校招测试说明&保密说明.pdf
+2027校招-崩坏：星穹铁道-AI研发工程师（场景管线）笔试.md
+AI模型磨损纹理生成工具需求.md
+参考图.png
+
+# Stale local install backup (full copy left by the pre-junction install)
+.ai_wear_installed_backup/

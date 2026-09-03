@@ -63,8 +63,8 @@ def finalize_rgb_field(sum_rgb: np.ndarray, sum_weight: np.ndarray) -> dict:
 
 def prepare_worn_overlay(encoded_rgb: np.ndarray, ai_field: np.ndarray,
                          rgb_valid: np.ndarray,
-                         evidence_low: float = 0.06,
-                         evidence_high: float = 0.55,
+                         mask_low: float = 0.06,
+                         mask_high: float = 0.55,
                          dark_limit: float = 0.06,
                          light_limit: float = 0.28) -> dict:
     """Turn fused view residuals into a safe material-overlay texture.
@@ -74,24 +74,24 @@ def prepare_worn_overlay(encoded_rgb: np.ndarray, ai_field: np.ndarray,
     everywhere.  Using it as the WornTex alpha made Wear Amount=100 apply the
     AI view's global brightness shift to the whole model.
 
-    Alpha is therefore derived from the independently fused AI wear evidence.
+    Alpha is therefore derived from the independently fused AI wear mask.
     A smooth contrast window rejects the low-level tone/noise floor while
     preserving strong scratches and edge chips.  The signed RGB residual is
     also bounded: image-edit models often relight the entire object, and an
     unbounded view-space residual is not valid material albedo.
 
     Returns ``rgb`` in the same unsigned residual encoding (0.5 is neutral) and
-    a continuous ``alpha`` wear-evidence envelope.  The shader still multiplies
+    a continuous ``alpha`` wear-mask envelope.  The shader still multiplies
     this alpha by the monotonic WearTime gate, so 30 is a subset of 60 of 100,
     while even 100 remains confined to AI-observed wear instead of whitening
     every camera-covered texel.
     """
     rgb = np.asarray(encoded_rgb, dtype=np.float32)
-    evidence = np.asarray(ai_field, dtype=np.float32)
+    mask = np.asarray(ai_field, dtype=np.float32)
     valid = np.asarray(rgb_valid, dtype=bool)
 
-    width = max(float(evidence_high) - float(evidence_low), 1e-6)
-    x = np.clip((evidence - float(evidence_low)) / width, 0.0, 1.0)
+    width = max(float(mask_high) - float(mask_low), 1e-6)
+    x = np.clip((mask - float(mask_low)) / width, 0.0, 1.0)
     alpha = (x * x * (3.0 - 2.0 * x)).astype(np.float32)
     alpha *= valid.astype(np.float32)
 

@@ -155,7 +155,7 @@ class AIWEAR_PT_experiments(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         s = context.scene.ai_wear
-        layout.prop(s, "use_ai_evidence")
+        layout.prop(s, "use_ai_mask")
         layout.prop(s, "use_geometry_prior")
         layout.prop(s, "use_topology_growth")
         layout.prop(s, "save_experiment_snapshot")
@@ -186,7 +186,6 @@ class AIWEAR_PT_presets(bpy.types.Panel):
     bl_category = "AI Wear"
     bl_label = "Presets"
     bl_parent_id = "AIWEAR_PT_main"
-    bl_options = {"DEFAULT_CLOSED"}
 
     def draw(self, context):
         layout = self.layout
@@ -198,10 +197,12 @@ class AIWEAR_PT_presets(bpy.types.Panel):
         col.operator("ai_wear.preset_save", icon="ADD", text="")
         col.operator("ai_wear.preset_load", icon="FILE_TICK", text="")
         col.operator("ai_wear.preset_delete", icon="REMOVE", text="")
+        layout.operator("ai_wear.restore_presets", icon="FILE_REFRESH")
 
 
 CLASSES = (
     AIWEAR_PT_main,
+    AIWEAR_PT_presets,
     AIWEAR_PT_uv,
     AIWEAR_PT_capture,
     AIWEAR_PT_prompt,
@@ -209,7 +210,6 @@ CLASSES = (
     AIWEAR_PT_seam,
     AIWEAR_PT_experiments,
     AIWEAR_PT_export,
-    AIWEAR_PT_presets,
 )
 
 

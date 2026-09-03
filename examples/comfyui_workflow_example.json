@@ -1,0 +1,65 @@
+{
+  "_comment": "示例 ComfyUI API-format 工作流（img2img 磨损编辑）。在 ComfyUI 界面 Save (API Format) 得到的就是这种结构。把节点 id 填到 Addon Preferences > ComfyUI Workflow：Clean Image Node=10, Prompt Node=12, Seed Node=15, Output Node=17。插件会自动覆盖 LoadImage 的 image、CLIPTextEncode 的 text、KSampler 的 seed，再从 SaveImage 取结果。",
+  "10": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "aiwear_placeholder.png"
+    }
+  },
+  "11": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {
+      "ckpt_name": "your_model.safetensors"
+    }
+  },
+  "12": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": ["11", 1],
+      "text": "realistic painted-metal chipping and scratches on edges, preserve silhouette and camera"
+    }
+  },
+  "13": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": ["11", 1],
+      "text": "blurry, low quality, deformed, changed shape, changed camera"
+    }
+  },
+  "14": {
+    "class_type": "VAEEncode",
+    "inputs": {
+      "pixels": ["10", 0],
+      "vae": ["11", 2]
+    }
+  },
+  "15": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": 12345,
+      "steps": 20,
+      "cfg": 7,
+      "sampler_name": "euler",
+      "scheduler": "normal",
+      "denoise": 0.55,
+      "model": ["11", 0],
+      "positive": ["12", 0],
+      "negative": ["13", 0],
+      "latent_image": ["14", 0]
+    }
+  },
+  "16": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["15", 0],
+      "vae": ["11", 2]
+    }
+  },
+  "17": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["16", 0],
+      "filename_prefix": "AIWear"
+    }
+  }
+}

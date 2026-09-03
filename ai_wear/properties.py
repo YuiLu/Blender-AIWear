@@ -80,12 +80,26 @@ def _make_wear_prompt(self, _context):
 
 
 class AIWearPreset(PropertyGroup):
-    """A saved wear parameter preset (save/load加分项)."""
+    """A saved wear parameter preset (save/load加分项).
+
+    Captures the full tunable set, including the experiment/ablation config from
+    ``EXPERIMENTS.md`` (camera count, view context, geometry/topology/AI mask
+    switches, seam/padding, amount/feather) so a single Load restores a whole
+    experiment arm.
+    """
 
     name: StringProperty(name="Preset Name", default="New Preset")
+    # prompt
     material: StringProperty(name="Material", default="painted metal")
     wear_type: StringProperty(name="Wear Type", default="chipping and scratches")
     max_state: StringProperty(name="Max Wear State", default="heavy")
+    prompt_extra: StringProperty(name="Extra Prompt", default="")
+    # capture / context (Experiments 1 & 2)
+    camera_preset: EnumProperty(items=CAMERA_PRESET_ITEMS, name="Cameras", default="AUTO_6")
+    camera_count: IntProperty(name="Cam Count", default=6, min=1, max=16)
+    view_context_mode: EnumProperty(items=VIEW_CONTEXT_ITEMS, name="View Context",
+                                    default="FIRST_ANCHOR")
+    # propensity weights
     w_ai: FloatProperty(name="w AI", default=0.6, min=0, max=2)
     w_convex: FloatProperty(name="w Convex", default=0.3, min=0, max=2)
     w_expose: FloatProperty(name="w Expose", default=0.2, min=0, max=2)
@@ -93,6 +107,16 @@ class AIWearPreset(PropertyGroup):
     alpha: FloatProperty(name="alpha", default=0.7, min=0, max=1)
     noise_amp: FloatProperty(name="noise amp", default=0.12, min=0, max=1)
     noise_scale: FloatProperty(name="noise scale", default=8.0, min=0.1, max=64)
+    # ablation switches (Experiments 3 & 4, plus the AI mask counterpart)
+    use_ai_mask: BoolProperty(name="AI Mask", default=True)
+    use_geometry_prior: BoolProperty(name="Geometry Prior", default=True)
+    use_topology_growth: BoolProperty(name="Topology Growth", default=True)
+    # seam / padding (Experiment 5)
+    seam_fuse: BoolProperty(name="Seam Fusion", default=True)
+    use_padding: BoolProperty(name="Island Padding", default=True)
+    # real-time threshold (Experiment 6)
+    wear_amount: FloatProperty(name="Wear Amount", default=60.0, min=0.0, max=100.0)
+    feather: FloatProperty(name="Feather", default=4.0, min=0.0, max=50.0)
 
 
 class AIWearSceneSettings(PropertyGroup):
@@ -193,9 +217,9 @@ class AIWearSceneSettings(PropertyGroup):
                                  description="Island dilation to prevent bilinear/mipmap bleed")
 
     # --- Experiments / ablation ------------------------------------------
-    use_ai_evidence: BoolProperty(
-        name="AI Evidence", default=True,
-        description="Include the reprojected AI difference field in wear propensity")
+    use_ai_mask: BoolProperty(
+        name="AI Mask", default=True,
+        description="Include the reprojected AI wear mask in wear propensity")
     use_geometry_prior: BoolProperty(
         name="Geometry Prior", default=True,
         description="Include convexity, exposure and cavity terms in wear propensity")
@@ -216,8 +240,15 @@ class AIWearSceneSettings(PropertyGroup):
     active_job_id: StringProperty(name="Active Job", default="")
 
     # --- Presets ----------------------------------------------------------
+    # Selecting a row applies it immediately (Load is a fallback for re-applying
+    # the already-selected preset). Uses the same apply_preset as the Load button.
+    def _active_preset_cb(s, c):
+        from . import presets as _presets
+        if 0 <= s.active_preset_index < len(s.presets):
+            _presets.apply_preset(s, s.presets[s.active_preset_index])
+
     presets: CollectionProperty(type=AIWearPreset)
-    active_preset_index: IntProperty(default=0)
+    active_preset_index: IntProperty(default=0, update=_active_preset_cb)
 
     def build_prompt(self) -> str:
         return _make_wear_prompt(self, None)

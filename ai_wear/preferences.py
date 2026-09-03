@@ -2,7 +2,7 @@
 
 The external image-generation API endpoint is fully configurable here. Keys use
 the PASSWORD subtype so they are not printed in tooltips/logs and are not
-written into the .blend. Environment variables take precedence over stored keys.
+written into the .blend.
 """
 
 from __future__ import annotations
@@ -27,15 +27,6 @@ PROVIDER_OPENAI = "OPENAI"
 PROVIDER_GEMINI = "GEMINI"
 PROVIDER_COMFYUI = "COMFYUI"
 PROVIDER_CUSTOM = "CUSTOM"
-
-
-def _env_or_stored(stored: str, env_name: str) -> Optional[str]:
-    """Environment variable wins over stored value; never log the result."""
-    if env_name:
-        v = os.environ.get(env_name)
-        if v:
-            return v
-    return stored or None
 
 
 class AIWearPreferences(AddonPreferences):
@@ -64,16 +55,9 @@ class AIWearPreferences(AddonPreferences):
     )
     api_key: StringProperty(
         name="API Key",
-        description="API key. Stored locally only; never written into the .blend. "
-                    "Set the env var below to avoid storing it at all",
+        description="API key. Stored locally only; never written into the .blend",
         default="",
         subtype="PASSWORD",
-    )
-    api_key_env: StringProperty(
-        name="Key Env Var",
-        description="If set, the key is read from this environment variable and the stored value is ignored",
-        default="",
-        subtype="NONE",
     )
     model_id: StringProperty(
         name="Model ID",
@@ -190,7 +174,7 @@ class AIWearPreferences(AddonPreferences):
     )
 
     def get_api_key(self) -> Optional[str]:
-        return _env_or_stored(self.api_key, self.api_key_env)
+        return self.api_key or None
 
     def get_base_url(self) -> str:
         return self.api_base_url.rstrip("/")
@@ -202,9 +186,7 @@ class AIWearPreferences(AddonPreferences):
         box = layout.box()
         box.label(text="Endpoint & Auth", icon="URL")
         box.prop(self, "api_base_url")
-        row = box.row(align=True)
-        row.prop(self, "api_key")
-        row.prop(self, "api_key_env", text="Env")
+        box.prop(self, "api_key")
         box.prop(self, "model_id")
 
         if self.provider == PROVIDER_CUSTOM:

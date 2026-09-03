@@ -9,6 +9,7 @@ from bpy.props import StringProperty, BoolProperty, EnumProperty, IntProperty, F
 from bpy_extras.io_utils import ExportHelper
 
 from . import pipeline
+from .. import presets
 from ..cache import job_cache
 from ..cache.job_cache import JobState
 
@@ -216,9 +217,20 @@ class AIWEAR_OT_preset_save(bpy.types.Operator):
         p.material = s.prompt_material
         p.wear_type = s.prompt_wear_type
         p.max_state = s.max_wear_state
+        p.prompt_extra = s.prompt_extra
+        p.camera_preset = s.camera_preset
+        p.camera_count = s.camera_count
+        p.view_context_mode = s.view_context_mode
         p.w_ai = s.w_ai; p.w_convex = s.w_convex
         p.w_expose = s.w_expose; p.w_cavity = s.w_cavity
         p.alpha = s.alpha; p.noise_amp = s.noise_amp; p.noise_scale = s.noise_scale
+        p.use_ai_mask = s.use_ai_mask
+        p.use_geometry_prior = s.use_geometry_prior
+        p.use_topology_growth = s.use_topology_growth
+        p.seam_fuse = s.seam_fuse
+        p.use_padding = s.use_padding
+        p.wear_amount = s.wear_amount
+        p.feather = s.feather
         s.active_preset_index = len(s.presets) - 1
         self.report({"INFO"}, f"Saved preset '{self.name}'")
         return {"FINISHED"}
@@ -239,12 +251,7 @@ class AIWEAR_OT_preset_load(bpy.types.Operator):
             return {"CANCELLED"}
         i = min(s.active_preset_index, len(s.presets) - 1)
         p = s.presets[i]
-        s.prompt_material = p.material
-        s.prompt_wear_type = p.wear_type
-        s.max_wear_state = p.max_state
-        s.w_ai = p.w_ai; s.w_convex = p.w_convex
-        s.w_expose = p.w_expose; s.w_cavity = p.w_cavity
-        s.alpha = p.alpha; s.noise_amp = p.noise_amp; s.noise_scale = p.noise_scale
+        presets.apply_preset(s, p)
         self.report({"INFO"}, f"Loaded preset '{p.name}'")
         return {"FINISHED"}
 
@@ -261,6 +268,18 @@ class AIWEAR_OT_preset_delete(bpy.types.Operator):
         i = min(s.active_preset_index, len(s.presets) - 1)
         s.presets.remove(i)
         s.active_preset_index = max(0, i - 1)
+        return {"FINISHED"}
+
+
+class AIWEAR_OT_restore_presets(bpy.types.Operator):
+    bl_idname = "ai_wear.restore_presets"
+    bl_label = "Restore Experiment Presets"
+    bl_description = "Clear and re-add the built-in EXPERIMENTS.md preset arms"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        presets.restore_experiment_presets(context.scene.ai_wear)
+        self.report({"INFO"}, "Restored experiment presets.")
         return {"FINISHED"}
 
 
@@ -338,6 +357,7 @@ CLASSES = (
     AIWEAR_OT_preset_save,
     AIWEAR_OT_preset_load,
     AIWEAR_OT_preset_delete,
+    AIWEAR_OT_restore_presets,
 )
 
 

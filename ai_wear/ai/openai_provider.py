@@ -22,7 +22,7 @@ class OpenAIProvider(AIProvider):
         if not prefs.api_base_url:
             probs.append("API Base URL is empty")
         if not prefs.get_api_key():
-            probs.append("API Key is empty (or set an env var)")
+            probs.append("API Key is empty")
         if not prefs.model_id:
             probs.append("Model ID is empty")
         return probs

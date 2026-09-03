@@ -14,8 +14,12 @@
 - 同一灯光、视角和截图曝光；
 - 开启 `Save Experiment Snapshot`，Label 使用下文建议名称。
 
-相机数量和上下文实验改变了 AI 输入，必须重新运行完整管线。几何先验、拓扑生长、seam、
-padding 和 Amount 对照可以使用同一批缓存图运行 `Replay Downstream`。
+相机数量、上下文和额外提示词实验改变了 AI 输入，必须重新运行完整管线。几何先验、拓扑生长、
+seam、padding 和 Amount 对照可以使用同一批缓存图运行 `Replay Downstream`。
+
+每一组实验参数都可以用 `Presets` 面板存成命名预设（Save Preset），之后 Load 一键恢复该组的
+相机数、View Context、几何/拓扑/AI Mask 开关、seam/padding、Amount/Feather 和
+额外提示词，避免在对照组之间手改参数。
 
 ## 实验 1：相机数量 1 / 6 / 8
 
@@ -35,7 +39,7 @@ cams_08
 
 定性观察：
 
-- 单视角背面和遮挡区是否缺少 AI 证据；
+- 单视角背面和遮挡区是否缺少 AI mask；
 - 6 视角是否已经覆盖主要外壳与边缘；
 - 8 个 Fibonacci 球面斜视角增加的上下表面信息是否值得额外耗时；
 - 多视角融合后是否出现互相冲突、变淡或重复纹理。
@@ -87,7 +91,7 @@ geometry_off    Geometry Prior = off
 geometry_on     Geometry Prior = on
 ```
 
-其他开关保持一致。展示相同观察角度下的模型，并附 `AIWear_Mask.png`，说明 AI evidence
+其他开关保持一致。展示相同观察角度下的模型，并附 `AIWear_Mask.png`，说明 AI mask
 输入没有变化，变化来自 convexity / exposure / cavity。
 
 定性观察：
@@ -155,8 +159,32 @@ amount_100
 
 - 30 的磨损区域是否包含在 60 中，60 是否包含在 100 中；
 - 增长是否从合理种子沿边缘扩展，而不是整张贴图一起变白；
-- 100 是否仍受 WornTex evidence alpha 限制；
+- 100 是否仍受 WornTex mask alpha 限制；
 - Feather 只改变边界软硬，不应改变磨损出现顺序。
+
+## 实验 7：额外提示词 有 / 无
+
+这组是完整 AI 实验，使用相同相机和主 prompt，只改变 `Extra Prompt`：
+
+```text
+extra_off    Extra Prompt = （留空）
+extra_on     Extra Prompt = "add fine micro-scratches and edge chipping; keep large flat faces mostly clean"
+```
+
+`Extra Prompt` 被原样追加到自动生成的 prompt 末尾（见 `_make_wear_prompt`），所以这组验证的
+是“文字补充能否把磨损颗粒度、位置约束压得更接近预期”，而不是模型或相机差异。
+
+展示内容：
+
+1. 两组并排的模型截图，观察角度相同；
+2. 各挑一张 `worn_V*` 和对应的 `diff_mask_V*` 对照；
+3. 记录两组 `elapsed_seconds`。
+
+定性观察：
+
+- 额外提示词是否让磨损更集中于边缘、棱角和高接触区，而不是均匀铺满；
+- 是否改变划痕的尺度、密度或颜色；
+- 留空时自动 prompt 的默认倾向是否已经足够，补充词是否与材质描述产生语义冲突。
 
 ## 可选：生长形态示意
 
@@ -176,4 +204,5 @@ amount_100
 4. 几何先验开关；
 5. 拓扑传播开关；
 6. seam 处理前后；
-7. ComfyUI / Liblib 局部重绘作为已实现 feature 单独展示，不列入实验。
+7. 额外提示词有 / 无；
+8. ComfyUI / Liblib 局部重绘作为已实现 feature 单独展示，不列入实验。

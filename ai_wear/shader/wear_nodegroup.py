@@ -12,7 +12,7 @@ the object's EXISTING material: it injects
                          gate * worn_tex.alpha)
 into the existing material's Principled BSDF, preserving the rest of the
 authored material (roughness, metallic, normals). worn_tex.alpha is the
-contrast-shaped, reprojected AI wear evidence (already intersected with valid
+contrast-shaped, reprojected AI wear mask (already intersected with valid
 camera coverage), so even Wear Amount=100 stays inside observed scratches and
 edge chips. Falls back to a standalone overlay material if the existing
 material has no Principled BSDF.
@@ -45,6 +45,11 @@ SOURCE_PROP = "ai_wear_source_material"
 # thin-island reprojection texels into the blocky/mosaic pattern seen on the
 # gaming-console sides, so the shader deliberately performs an exact decode.
 DELTA_DECODE_GAIN = 2.0
+# The smoothstep gate collapses to a division-by-zero (hard step / NaN) in the
+# MapRange node when feather is exactly 0.  Clamp to a tiny positive width so the
+# gate stays well-defined at the slider's 0 end; 1e-4 is imperceptibly narrow and
+# matches the mask-export guard in operators/runner.py.
+FEATHER_EPS = 1e-4
 
 
 def ensure_node_group() -> ShaderNodeTree:
@@ -180,7 +185,7 @@ def attach_wear_overlay(obj, weartime_img, worn_img,
                                   existing_base_color + decode(worn_delta),
                                   gate * worn_tex.alpha)  into the existing
     material's Principled BSDF, where gate = the AIWearMask group's smoothstep
-    threshold of WearTime and worn_tex.alpha is reprojected AI wear evidence
+    threshold of WearTime and worn_tex.alpha is reprojected AI wear mask
     (so camera coverage alone can never activate the appearance). The
     rest of the authored material (roughness, metallic, normals) is preserved.
     Authored materials are copied per object before injection, so shared source
@@ -258,7 +263,7 @@ def _inject_overlay(mat, bsdf, weartime_img, worn_img,
         rgb.outputs["Color"].default_value = (dv[0], dv[1], dv[2], 1.0)
         base_src_socket = rgb.outputs["Color"]
 
-    # gate * AI evidence(alpha): show the residual only where WearTime says worn
+    # gate * AI mask(alpha): show the residual only where WearTime says worn
     # AND the clean/worn comparison found a real scratch/chip.
     alpha_mul = _find_node(nt, ALPHA_MUL, "ShaderNodeMath")
     alpha_mul.operation = "MULTIPLY"
@@ -370,7 +375,7 @@ def set_amount(mat, amount01: float):
 def set_feather(mat, feather01: float):
     g = _group_node(mat)
     if g:
-        g.inputs["Feather"].default_value = feather01
+        g.inputs["Feather"].default_value = max(float(feather01), FEATHER_EPS)
 
 
 def update_active(context, amount: float, feather: float):

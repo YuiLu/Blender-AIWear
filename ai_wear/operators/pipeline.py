@@ -148,7 +148,7 @@ def snapshot_context(context) -> dict:
         "seam_diffuse": s.seam_diffuse_texels,
         "use_padding": s.use_padding,
         "padding": s.padding_texels,
-        "use_ai_evidence": s.use_ai_evidence,
+        "use_ai_mask": s.use_ai_mask,
         "use_geometry_prior": s.use_geometry_prior,
         "use_topology_growth": s.use_topology_growth,
         "save_experiment_snapshot": s.save_experiment_snapshot,
@@ -185,10 +185,7 @@ def _require_api_key(provider: str, prefs_obj) -> None:
             "API key is empty — the endpoint would reject with HTTP 401 "
             "'Missing bearer or basic' (no Authorization header is sent). Open "
             "Edit > Preferences > Add-ons > AI Wear Texture and paste your key "
-            "into 'API Key'. If 'Key Env Var' is set, that env var must exist in "
-            "Blender's own process environment (a Blender launched from the "
-            "Start Menu does NOT inherit your terminal's env vars — set a "
-            "system-level env var, or just paste the key into the field)."
+            "into 'API Key'."
         )
 
 
@@ -358,7 +355,7 @@ def _save_uv_texture(path: str, rgba: np.ndarray, fmt: str) -> str:
 
 def _effective_weights(snap: dict) -> dict:
     weights = dict(snap["weights"])
-    if not snap.get("use_ai_evidence", True):
+    if not snap.get("use_ai_mask", True):
         weights["w_ai"] = 0.0
     if not snap.get("use_geometry_prior", True):
         weights["w_convex"] = 0.0
@@ -388,7 +385,7 @@ def _experiment_config(snap: dict, n_views: int, replayed: bool) -> dict:
         "gamma", "alpha", "noise_amp", "noise_scale", "use_barrier",
         "mat_penalty", "coverage_target", "use_comfy_inpaint",
         "inpaint_edge_width", "seam_fuse", "seam_diffuse", "use_padding",
-        "padding", "use_ai_evidence", "use_geometry_prior",
+        "padding", "use_ai_mask", "use_geometry_prior",
         "use_topology_growth", "export_format", "wear_amount", "feather",
     )
     cfg = {key: snap.get(key) for key in keys}

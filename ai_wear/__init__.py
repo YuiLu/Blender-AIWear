@@ -30,6 +30,7 @@ import bpy
 
 from . import preferences
 from . import properties
+from . import presets
 from . import utils  # noqa: F401  (numpy helpers; no classes)
 from .operators import runner
 from .operators import pipeline  # noqa: F401  (no classes)
@@ -41,6 +42,39 @@ def _register_providers():
     ai_base.ensure_providers_registered()
 
 
+def _seed_all_scenes():
+    # During startup addon-enable, bpy.data is a restricted proxy with no
+    # .scenes — skip and let the load_post handler seed once the file is loaded.
+    try:
+        scenes = bpy.data.scenes
+    except Exception:
+        return
+    for scene in scenes:
+        presets.seed_experiment_presets(scene.ai_wear)
+
+
+def _seed_presets_on_load(_dummy):
+    _seed_all_scenes()
+
+
+def _seed_retry_timer():
+    """One-shot safety net: seed every scene once bpy.data is writable.
+
+    During startup addon-enable ``bpy.data.scenes`` is a restricted proxy, so the
+    register-time seed bails; and for a scene opened without a .blend load (the
+    default startup scene) load_post never fires. This timer retries every 0.2s
+    until the data is accessible, then seeds and stops — so the Presets panel is
+    never left empty.
+    """
+    try:
+        scenes = bpy.data.scenes
+    except Exception:
+        return 0.2
+    for scene in scenes:
+        presets.seed_experiment_presets(scene.ai_wear)
+    return None
+
+
 def register():
     # Order matters: preferences (AddonPreferences) → properties (PropertyGroups
     # + PointerProperty on Scene/Object) → operators → UI panels.
@@ -49,9 +83,20 @@ def register():
     runner.register()
     ui.panels.register()
     _register_providers()
+    # Seed the experiment presets so the Presets panel isn't blank: at register
+    # time, on every subsequent .blend load, and via a retry timer that covers
+    # the startup window where bpy.data is still restricted.
+    _seed_all_scenes()
+    bpy.app.handlers.load_post.append(_seed_presets_on_load)
+    if not bpy.app.timers.is_registered(_seed_retry_timer):
+        bpy.app.timers.register(_seed_retry_timer, first_interval=0.2)
 
 
 def unregister():
+    if _seed_presets_on_load in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_seed_presets_on_load)
+    if bpy.app.timers.is_registered(_seed_retry_timer):
+        bpy.app.timers.unregister(_seed_retry_timer)
     ui.panels.unregister()
     runner.unregister()
     properties.unregister()
