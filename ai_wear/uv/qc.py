@@ -15,6 +15,14 @@ import numpy as np
 from .rasterizer import build_uv_field, _find_uv_layer
 
 
+# Below this point a nominally valid atlas has too few texels to preserve the
+# projected image detail.  The old 2% gate let a 1024px gaming-console unwrap
+# through with only 22k occupied texels; seam/padding then operated on islands
+# only a few pixels wide and the material looked blocky and blurred.
+MIN_UTILIZATION = 0.10
+MAX_OVERLAP_RATIO = 0.02
+
+
 def has_uv(mesh, layer_name: Optional[str] = None) -> bool:
     return _find_uv_layer(mesh, layer_name) is not None
 
@@ -91,9 +99,9 @@ def compute_uv_qc(obj, layer_name: Optional[str], depsgraph=None,
         report["ok"] = bool(
             report["has_uv"]
             and report["zero_area_count"] == 0
-            and report["overlap_ratio"] < 0.02
+            and report["overlap_ratio"] < MAX_OVERLAP_RATIO
             and not report["out_of_01"]
-            and report["utilization"] > 0.02
+            and report["utilization"] >= MIN_UTILIZATION
         )
         return report
     finally:

@@ -1,9 +1,10 @@
 """Mode A / Mode B + Blender auto-unwrap.
 
 Mode A: pick an existing UV layer as the Target Wear UV, do NOT modify it.
-Mode B: keep every original UV; add a fresh AI_WearUV layer and auto-unwrap it
-with Smart UV Project + Pack Islands, then run the same UV QC. If QC fails the
-first time, retry once with a wider angle limit and larger margin.
+Mode B: keep every original UV; reuse a production-ready authored layout when
+possible, otherwise add an AI_WearUV layer and auto-unwrap it with Smart UV
+Project + Pack Islands. If QC fails, retry with a wider angle and smaller
+packing margin so surface texel density is not sacrificed.
 
 Scene state (active object / mode / selection / UV layer / the area we may have
 borrowed) is saved and restored, so the user's workspace is untouched afterwards.
@@ -11,11 +12,53 @@ borrowed) is saved and restored, so the user's workspace is untouched afterwards
 
 from __future__ import annotations
 
+from array import array
 import math
 from typing import Optional, Tuple
 
 from . import qc
 from .rasterizer import _find_uv_layer
+
+
+# Blender's Smart UV ``island_margin`` uses a scaled packing factor, not a
+# literal texel distance. Feeding padding_texels / resolution into it produced
+# a 0.015625 margin at 1K; on a mesh with thousands of islands that shrank the
+# actual UV surface coverage to ~2%. Padding is a later texture-domain step and
+# must not be mapped 1:1 to this packing control.
+MIN_SCALED_MARGIN = 0.00025
+MAX_SCALED_MARGIN = 0.002
+COPY_MAX_OVERLAP = 0.0001
+
+
+def _scaled_uv_margin(work_resolution: int) -> float:
+    """A conservative Smart-UV margin that preserves usable texel density."""
+    return min(MAX_SCALED_MARGIN,
+               max(MIN_SCALED_MARGIN, 0.5 / max(1, int(work_resolution))))
+
+
+def _reusable_uv_report(report: dict) -> bool:
+    """Whether an authored UV can safely seed the independent wear layer."""
+    return bool(
+        report.get("ok", False)
+        and report.get("overlap_ratio", 1.0) <= COPY_MAX_OVERLAP
+        and report.get("utilization", 0.0) >= qc.MIN_UTILIZATION
+    )
+
+
+def _copy_uv_layer(source, target) -> None:
+    """Copy per-loop coordinates without making the source the render UV."""
+    if len(source.data) != len(target.data):
+        raise RuntimeError("UV layer loop counts do not match.")
+    values = array("f", [0.0]) * (len(source.data) * 2)
+    source.data.foreach_get("uv", values)
+    target.data.foreach_set("uv", values)
+
+
+def _tag_report(report: dict, strategy: str, source: Optional[str] = None) -> dict:
+    report["mode_b_strategy"] = strategy
+    if source:
+        report["source_uv_layer"] = source
+    return report
 
 
 # --- scene state -------------------------------------------------------------
@@ -124,7 +167,7 @@ def _run_uv_ops(obj, angle_rad: float, island_margin: float,
             # mesh regardless of UV selection.
             bpy.ops.uv.smart_project(angle_limit=angle_rad,
                                      island_margin=island_margin,
-                                     scale_to_bounds=False)
+                                     scale_to_bounds=True)
             # Pack Islands only tightens the layout; it needs UVs selected, and
             # smart_project may leave the selection cleared. Re-select all so
             # pack has something to operate on.
@@ -180,14 +223,53 @@ def setup_mode_b(obj, layer_name: str, work_resolution: int,
     state = _State()
     state.save_uv(obj)
     try:
-        # Create the new layer (or reuse if it already exists)
-        layer = None
-        for l in obj.data.uv_layers:
-            if l.name == layer_name:
-                layer = l
-                break
+        dg = depsgraph or bpy.context.evaluated_depsgraph_get()
+
+        # Preserve an artist-authored wear layer when it already has enough
+        # usable texel area. Re-running Smart UV on every Generate used to
+        # destroy a good layout even though nothing about the mesh had changed.
+        layer = _find_uv_layer(obj.data, layer_name)
+        if layer is not None:
+            existing_report = qc.compute_uv_qc(
+                obj, layer_name, depsgraph=dg, low_res=256)
+            if _reusable_uv_report(existing_report):
+                obj.data.uv_layers.active_index = list(obj.data.uv_layers).index(layer)
+                return True, layer_name, _tag_report(
+                    existing_report, "kept_existing", layer_name)
+
+        # If the asset already has a production-quality, non-overlapping UV,
+        # clone it into a separate wear layer. This keeps the base material UV
+        # untouched while avoiding needless fragmentation from Smart Project.
+        candidates = []
+        for source in obj.data.uv_layers:
+            if source.name == layer_name:
+                continue
+            source_report = qc.compute_uv_qc(
+                obj, source.name, depsgraph=dg, low_res=256)
+            if _reusable_uv_report(source_report):
+                candidates.append((source_report["utilization"], source, source_report))
+        if candidates:
+            _util, source, _source_report = max(candidates, key=lambda item: item[0])
+            if layer is None:
+                layer = obj.data.uv_layers.new(name=layer_name, do_init=False)
+            _copy_uv_layer(source, layer)
+            obj.data.uv_layers.active_index = list(obj.data.uv_layers).index(layer)
+            obj.data.update()
+            # The downstream rasterizer reads the evaluated mesh. Force the
+            # depsgraph to see the copied loop UVs immediately; otherwise a
+            # Generate started in the same UI event can still receive the old
+            # evaluated AI_WearUV for one cycle.
+            try:
+                dg.update()
+            except Exception:
+                pass
+            report = qc.compute_uv_qc(obj, layer.name, depsgraph=dg, low_res=256)
+            return True, layer.name, _tag_report(
+                report, "copied_existing", source.name)
+
+        # No suitable source exists: generate a fresh, unique wear atlas.
         if layer is None:
-            layer = obj.data.uv_layers.new(name=layer_name)
+            layer = obj.data.uv_layers.new(name=layer_name, do_init=False)
         # Capture the layer's real name as a plain string NOW, before any UV op.
         # _run_uv_ops toggles EDIT mode and runs smart_project/pack_islands, which
         # invalidates this RNA object reference; accessing layer.name afterwards
@@ -197,24 +279,26 @@ def setup_mode_b(obj, layer_name: str, work_resolution: int,
         real_name = layer.name
         obj.data.uv_layers.active_index = obj.data.uv_layers[:].index(layer)
 
-        island_margin = max(0.002, padding_texels / max(1, work_resolution))
-        pack_margin = max(0.001, padding_texels / max(1, work_resolution * 2))
+        island_margin = _scaled_uv_margin(work_resolution)
+        pack_margin = island_margin
         angle = math.radians(angle_deg)
 
         _run_uv_ops(obj, angle, island_margin, pack_margin, state)
         bpy.ops.object.mode_set(mode="OBJECT")
         layer = _find_uv_layer(obj.data, real_name) or obj.data.uv_layers.active
 
-        report = qc.compute_uv_qc(obj, real_name, depsgraph=depsgraph, low_res=256)
-        if not report.get("ok", False) and report.get("overlap_ratio", 0) > 0.02:
-            # One retry with a wider angle + larger margin
+        report = qc.compute_uv_qc(obj, real_name, depsgraph=dg, low_res=256)
+        if not report.get("ok", False):
+            # One retry with a wider angle and a smaller packing margin. A low
+            # utilization failure needs more texel area, not the old doubled
+            # margin which made the shrinkage worse.
             angle2 = math.radians(min(89.0, angle_deg + 15.0))
-            margin2 = island_margin * 2.0
-            pack2 = pack_margin * 2.0
+            margin2 = max(MIN_SCALED_MARGIN, island_margin * 0.5)
+            pack2 = margin2
             _run_uv_ops(obj, angle2, margin2, pack2, state)
             bpy.ops.object.mode_set(mode="OBJECT")
             layer = _find_uv_layer(obj.data, real_name) or obj.data.uv_layers.active
-            report = qc.compute_uv_qc(obj, real_name, depsgraph=depsgraph, low_res=256)
-        return True, real_name, report
+            report = qc.compute_uv_qc(obj, real_name, depsgraph=dg, low_res=256)
+        return True, real_name, _tag_report(report, "smart_project")
     finally:
         state.restore()

@@ -115,6 +115,9 @@ def snapshot_context(context) -> dict:
     obj = context.active_object
     obj_uuid = (obj.ai_wear.mesh_hash if obj and obj.ai_wear.mesh_hash
                 else (obj.name if obj else "obj"))
+    preset_name = ""
+    if 0 <= s.active_preset_index < len(s.presets):
+        preset_name = s.presets[s.active_preset_index].name
     return {
         "object_name": obj.name if obj else None,
         "obj_uuid": obj_uuid,
@@ -152,6 +155,7 @@ def snapshot_context(context) -> dict:
         "use_topology_growth": s.use_topology_growth,
         "save_experiment_snapshot": s.save_experiment_snapshot,
         "experiment_label": s.experiment_label,
+        "preset_name": preset_name,
         "export_format": s.export_format,
         "wear_amount": s.wear_amount,
         "feather": s.feather,
@@ -386,6 +390,7 @@ def _experiment_config(snap: dict, n_views: int, replayed: bool) -> dict:
         "inpaint_edge_width", "seam_fuse", "seam_diffuse", "use_padding",
         "padding", "use_ai_mask", "use_geometry_prior",
         "use_topology_growth", "export_format", "wear_amount", "feather",
+        "preset_name",
     )
     cfg = {key: snap.get(key) for key in keys}
     cfg["effective_weights"] = _effective_weights(snap)
@@ -565,9 +570,15 @@ def _step_preflight(snap, job, bridge):
             ok, layer, uvr = unwrap_blender.setup_mode_b(
                 obj, snap["target_uv_layer"] or "AI_WearUV",
                 snap["work_resolution"], depsgraph=bpy.context.evaluated_depsgraph_get())
+            if not ok:
+                raise RuntimeError(layer)
             report["uv_qc"] = uvr
             if not uvr.get("ok"):
-                job.message = f"Mode B UV QC warns: overlap={uvr.get('overlap_ratio',0):.2%}"
+                raise RuntimeError(
+                    "Mode B could not create a production-quality wear UV: "
+                    f"utilization={uvr.get('utilization', 0):.1%}, "
+                    f"overlap={uvr.get('overlap_ratio', 0):.2%}. "
+                    "Use a valid authored UV in Mode A or adjust the mesh unwrap.")
         # Compute UV QC once, store for the panel AND print to the console.
         qr = qc.compute_uv_qc(obj, layer, low_res=256)
         report_txt = qc.format_report(qr)
@@ -588,8 +599,11 @@ def _save_oblique_preview(obj_name, cache_dir, snap, bridge):
     Best-effort: a failed comparison render must never fail the run. The wear
     overlay is already attached to the object by this point, so the fixed
     oblique camera captures the actual worn result. Named by the experiment
-    label under ``<cache>/experiments/oblique_renders`` so consecutive runs are
-    directly comparable (identical framing, preset-aligned filename).
+    preset name under ``<cache>/experiments/oblique_renders``. Generate and
+    Replay intentionally update the same per-preset comparison image.
+
+    Returns a plain metadata dict on success, or ``None`` if the best-effort
+    render failed.
     """
     def _render():
         import bpy
@@ -597,15 +611,23 @@ def _save_oblique_preview(obj_name, cache_dir, snap, bridge):
         if obj is None or obj.type != "MESH":
             return
         from ..render import oblique
-        label = utils.safe_name(snap.get("experiment_label") or "render")
+        label = utils.safe_name(
+            snap.get("preset_name") or snap.get("experiment_label") or "render")
         out_dir = os.path.join(cache_dir, "experiments", "oblique_renders")
-        oblique.render_oblique(bpy.context.scene, obj,
-                               os.path.join(out_dir, label + "_oblique.png"))
+        out_path = os.path.join(out_dir, label + "_oblique.png")
+        oblique.render_oblique(bpy.context.scene, obj, out_path)
+        return {"path": out_path, "camera": oblique.CAMERA_NAME}
     try:
-        bridge.run(_render)
+        result = bridge.run(_render)
+        if result:
+            _log_text(
+                f"[AI Wear] Fixed oblique render saved to '{result['path']}' "
+                f"with camera '{result['camera']}'.")
+        return result
     except Exception:
         # A comparison shot must not break a successful run.
         traceback.print_exc()
+        return None
 
 
 def _run_pipeline(job, snap, bridge):
@@ -876,6 +898,7 @@ def _run_pipeline(job, snap, bridge):
         with open(os.path.join(out_dir, "views.json"), "w", encoding="utf-8") as f:
             json.dump({"resolution": snap["render_resolution"],
                        "work_resolution": snap["work_resolution"],
+                       "uv_mode": snap["uv_mode"],
                        "layer": layer_name, "object": obj_name,
                        "view_context_mode": context_mode,
                        "view_context_supported": context_supported,
@@ -1037,7 +1060,10 @@ def _run_pipeline(job, snap, bridge):
             cache_dir, snap, job, n_views, ai_field,
             wearthreshold_before_post, wearthreshold_uv, replayed=False)
         job.meta["experiment_dir"] = exp_dir
-    _save_oblique_preview(obj_name, cache_dir, snap, bridge)
+    oblique_meta = _save_oblique_preview(obj_name, cache_dir, snap, bridge)
+    if oblique_meta:
+        job.meta["oblique_render_path"] = oblique_meta["path"]
+        job.meta["oblique_camera_name"] = oblique_meta["camera"]
     job.state = JobState.DONE
     job.stage = JobStage.EXPORT
     job.progress = 1.0
@@ -1056,7 +1082,7 @@ def _run_replay(job, snap, bridge):
     import json
     import bpy
     from ..uv.rasterizer import build_uv_field
-    from ..uv import seam_registry
+    from ..uv import qc as uvqc, seam_registry, unwrap_blender
     from ..surface import projection, fusion, geometry_prior, wear_growth
     from ..shader import wear_nodegroup as shader
 
@@ -1075,6 +1101,7 @@ def _run_replay(job, snap, bridge):
     if not view_records:
         raise RuntimeError("views.json has no views. Run the full pipeline once first.")
     layer_name = manifest.get("layer") or (snap["target_uv_layer"] or "AI_WearUV")
+    uv_mode = manifest.get("uv_mode", snap.get("uv_mode", "MODE_B"))
     res = int(manifest.get("work_resolution", snap["work_resolution"]))
     uv_snapshot_path = os.path.join(
         cache_dir, manifest.get("uv_snapshot") or UV_SNAPSHOT_FILENAME)
@@ -1096,15 +1123,43 @@ def _run_replay(job, snap, bridge):
     def _build_uv():
         obj = bpy.data.objects.get(obj_name)
         restore = _restore_uv_snapshot(obj, layer_name, uv_snapshot_path)
+        depsgraph = bpy.context.evaluated_depsgraph_get()
         if restore["restored"]:
+            depsgraph.update()
             _log_text(
                 f"[AI Wear] Replay restored missing UV layer '{layer_name}' "
                 f"via {restore['method']} from '{restore['source']}'.")
-            # Upgrade a legacy cache immediately so all later replays restore
-            # exact coordinates instead of relying on the single-UV fallback.
+
+        # Caches made by the old Mode-B unwrap can contain a technically valid
+        # but unusably sparse atlas (the reported asset occupied only 2.1% of a
+        # 1K texture). Repair it before reprojection so existing known-good AI
+        # views can be reused without another render/API call.
+        if uv_mode == "MODE_B":
+            uv_report = uvqc.compute_uv_qc(
+                obj, layer_name, depsgraph=depsgraph, low_res=256)
+            if not uv_report.get("ok", False):
+                ok, repaired_layer, repaired_report = unwrap_blender.setup_mode_b(
+                    obj, layer_name, res, depsgraph=depsgraph)
+                if not ok or not repaired_report.get("ok", False):
+                    raise RuntimeError(
+                        "Replay could not repair the cached Mode-B UV: "
+                        f"utilization={repaired_report.get('utilization', 0):.1%}, "
+                        f"overlap={repaired_report.get('overlap_ratio', 0):.2%}.")
+                layer_name_local = repaired_layer
+                restore["mode_b_repaired"] = True
+                restore["repair_strategy"] = repaired_report.get("mode_b_strategy")
+                restore["repair_source"] = repaired_report.get("source_uv_layer")
+                _log_text(
+                    f"[AI Wear] Replay repaired sparse Mode-B UV '{layer_name_local}' "
+                    f"via {restore['repair_strategy']} "
+                    f"(utilization={repaired_report.get('utilization', 0):.1%}).")
+
+        if restore["restored"] or restore.get("mode_b_repaired"):
+            # Upgrade legacy/bad caches immediately so later replays restore
+            # the exact corrected coordinates.
             _save_uv_snapshot(obj, layer_name, uv_snapshot_path)
         uvf = build_uv_field(obj, layer_name, res,
-                             depsgraph=bpy.context.evaluated_depsgraph_get())
+                             depsgraph=depsgraph)
         if uvf is None:
             raise RuntimeError(
                 f"Replay: UV layer '{layer_name}' not found on '{obj_name}'. The "
@@ -1171,6 +1226,7 @@ def _run_replay(job, snap, bridge):
     # Backfill the mask filenames into an older views.json when Replay is used
     # on caches created before per-view diff-mask persistence was added.
     manifest["views"] = view_records
+    manifest["uv_mode"] = uv_mode
     manifest["uv_snapshot"] = UV_SNAPSHOT_FILENAME
     with open(views_json, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
@@ -1304,7 +1360,11 @@ def _run_replay(job, snap, bridge):
             cache_dir, snap, job, n_views, ai_field,
             wearthreshold_before_post, wearthreshold_uv, replayed=True)
         job.meta["experiment_dir"] = exp_dir
-    _save_oblique_preview(obj_name, cache_dir, snap, bridge)
+    job.message = "Replay: rendering fixed oblique preview…"; job.progress = 0.99
+    oblique_meta = _save_oblique_preview(obj_name, cache_dir, snap, bridge)
+    if oblique_meta:
+        job.meta["oblique_render_path"] = oblique_meta["path"]
+        job.meta["oblique_camera_name"] = oblique_meta["camera"]
     job.state = JobState.DONE
     job.stage = JobStage.EXPORT
     job.progress = 1.0
@@ -1512,6 +1572,24 @@ def get_active_job(context):
     return job_cache.get_job(jid) if jid else None
 
 
+def _apply_active_preset(context) -> str:
+    """Re-apply the selected preset and return its name.
+
+    Selection normally applies a preset via its update callback, but explicit
+    re-application here guarantees Replay cannot accidentally snapshot values
+    left over from manual edits or another preset.
+    """
+    settings = context.scene.ai_wear
+    index = settings.active_preset_index
+    if not (0 <= index < len(settings.presets)):
+        return ""
+    from .. import presets
+    preset = settings.presets[index]
+    preset_name = preset.name
+    presets.apply_preset(settings, preset)
+    return preset_name
+
+
 def start_replay(context) -> str:
     """Launch a downstream-only replay (no render, no AI). See _run_replay.
 
@@ -1519,8 +1597,11 @@ def start_replay(context) -> str:
     full run on the active object. Lets you iterate on surface/WearThreshold params
     without spending API budget (Q3).
     """
-    snap = snapshot_context(context)
     _log_clear()
+    preset_name = _apply_active_preset(context)
+    snap = snapshot_context(context)
+    if preset_name:
+        _log_text(f"[AI Wear] Replay applied current preset '{preset_name}'.")
     job = job_cache.create_job()
     bridge = MainThreadBridge()
     bridge._interval = snap["poll_interval"]

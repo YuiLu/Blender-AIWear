@@ -17,7 +17,8 @@ ai_wear.register()
 
 s = bpy.context.scene.ai_wear
 from ai_wear import presets
-assert len(s.presets) == 14, len(s.presets)
+from ai_wear.operators import pipeline
+assert len(s.presets) == len(presets.DEFAULT_EXPERIMENT_PRESETS), len(s.presets)
 
 # auto-apply: selecting 'amount_30' should move the scene Wear Amount to 30
 idx = [p.name for p in s.presets].index("amount_30")
@@ -37,5 +38,19 @@ p.wear_amount = 42.0
 presets.apply_preset(s, p)
 assert abs(s.wear_amount - 42.0) < 1e-6, s.wear_amount
 print("apply_preset round-trip OK")
+
+# Replay must re-apply the selected preset immediately before snapshotting, so
+# a stale manual edit cannot make a file named for one preset contain another
+# preset's parameters.
+idx = [p.name for p in s.presets].index("amount_30")
+s.active_preset_index = idx
+s.wear_amount = 99.0
+active_name = pipeline._apply_active_preset(bpy.context)
+assert active_name == "amount_30", active_name
+assert abs(s.wear_amount - 30.0) < 1e-6, s.wear_amount
+snap = pipeline.snapshot_context(bpy.context)
+assert snap["preset_name"] == "amount_30", snap["preset_name"]
+assert abs(snap["wear_amount"] - 30.0) < 1e-6, snap["wear_amount"]
+print("Replay preset re-apply + snapshot naming OK")
 
 print("ALL PRESET-APPLY OK")
