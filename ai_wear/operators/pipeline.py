@@ -741,6 +741,12 @@ def _run_pipeline(job, snap, bridge):
                              and cap.max_reference_images > 1)
     job.meta["view_context_mode"] = context_mode
     job.meta["view_context_supported"] = context_supported
+    if context_mode != "NONE" and not context_supported:
+        warning = (
+            f"Provider '{snap['provider']}' cannot send an additional worn-view "
+            f"reference; '{context_mode}' will run as independent views.")
+        job.meta["view_context_warning"] = warning
+        _log_text("[AI Wear] WARNING: " + warning)
     # Per-view projection records, saved to views.json so the downstream
     # (mask → projection → fusion → WearThreshold → bake) can be replayed later
     # WITHOUT re-running AI: the replay reuses the exact camera matrices the
@@ -960,10 +966,13 @@ def _run_pipeline(job, snap, bridge):
         registry = bridge.run(lambda: seam_registry.build_seam_registry(
             bpy.data.objects.get(obj_name), layer_name))
         qa_before = seam_registry.seam_qa(wearthreshold_uv, registry, res)
-        wearthreshold_uv = seam_registry.fuse_seam(wearthreshold_uv, registry, res, snap["seam_diffuse"])
-        worn_uv = seam_registry.fuse_seam_rgb(worn_uv, registry, res, snap["seam_diffuse"])
+        wearthreshold_uv = seam_registry.fuse_seam(
+            wearthreshold_uv, registry, res, snap["seam_diffuse"],
+            valid=uvfield.valid)
+        worn_uv = seam_registry.fuse_seam_rgb(
+            worn_uv, registry, res, snap["seam_diffuse"], valid=rgb_valid)
         wear_alpha = seam_registry.fuse_seam(
-            wear_alpha, registry, res, snap["seam_diffuse"])
+            wear_alpha, registry, res, snap["seam_diffuse"], valid=rgb_valid)
         job.meta["seam_before_p95"] = qa_before["p95"]
         bridge.run(lambda: seam_registry.visualize_seams(
             bpy.data.objects.get(obj_name), registry))
@@ -1283,10 +1292,13 @@ def _run_replay(job, snap, bridge):
         registry = bridge.run(lambda: seam_registry.build_seam_registry(
             bpy.data.objects.get(obj_name), layer_name))
         qa_before = seam_registry.seam_qa(wearthreshold_uv, registry, res)
-        wearthreshold_uv = seam_registry.fuse_seam(wearthreshold_uv, registry, res, snap["seam_diffuse"])
-        worn_uv = seam_registry.fuse_seam_rgb(worn_uv, registry, res, snap["seam_diffuse"])
+        wearthreshold_uv = seam_registry.fuse_seam(
+            wearthreshold_uv, registry, res, snap["seam_diffuse"],
+            valid=uvfield.valid)
+        worn_uv = seam_registry.fuse_seam_rgb(
+            worn_uv, registry, res, snap["seam_diffuse"], valid=rgb_valid)
         wear_alpha = seam_registry.fuse_seam(
-            wear_alpha, registry, res, snap["seam_diffuse"])
+            wear_alpha, registry, res, snap["seam_diffuse"], valid=rgb_valid)
         job.meta["seam_before_p95"] = qa_before["p95"]
         bridge.run(lambda: seam_registry.visualize_seams(
             bpy.data.objects.get(obj_name), registry))

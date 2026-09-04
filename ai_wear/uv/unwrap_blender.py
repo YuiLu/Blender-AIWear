@@ -214,7 +214,7 @@ def setup_mode_a(obj, layer_name: Optional[str]) -> Tuple[bool, str]:
 
 def setup_mode_b(obj, layer_name: str, work_resolution: int,
                  angle_deg: float = 66.0,
-                 padding_texels: int = 16,
+                 padding_texels: int = 2,
                  depsgraph=None) -> Tuple[bool, str, dict]:
     """Create AI_WearUV, preserve all existing UVs, auto-unwrap, then QC."""
     import bpy

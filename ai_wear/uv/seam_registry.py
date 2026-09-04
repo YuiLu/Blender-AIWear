@@ -23,6 +23,28 @@ class SeamPair:
     uv_a1: np.ndarray
     uv_b0: np.ndarray
     uv_b1: np.ndarray
+    # Unit directions pointing from the seam into each adjacent UV face.  They
+    # let fusion reconcile a narrow strip on both islands instead of painting
+    # only the edge texel, which otherwise remains visible as a bright halo.
+    uv_a_inward: Optional[np.ndarray] = None
+    uv_b_inward: Optional[np.ndarray] = None
+
+
+def _face_inward_uv(face, uv_layer, start: np.ndarray,
+                    end: np.ndarray) -> np.ndarray:
+    centre = np.mean([
+        np.array([loop[uv_layer].uv.x, loop[uv_layer].uv.y], dtype=np.float64)
+        for loop in face.loops
+    ], axis=0)
+    tangent = np.asarray(end, dtype=np.float64) - np.asarray(start, dtype=np.float64)
+    length = float(np.linalg.norm(tangent))
+    if length < 1e-12:
+        return np.zeros(2, dtype=np.float64)
+    inward = np.array([-tangent[1], tangent[0]], dtype=np.float64) / length
+    midpoint = 0.5 * (np.asarray(start) + np.asarray(end))
+    if float(np.dot(inward, centre - midpoint)) < 0.0:
+        inward *= -1.0
+    return inward
 
 
 def build_seam_registry(obj, uv_layer_name: Optional[str]) -> List[SeamPair]:
@@ -54,43 +76,27 @@ def build_seam_registry(obj, uv_layer_name: Optional[str]) -> List[SeamPair]:
         c1 = (np.allclose(a0, b0, atol=eps) and np.allclose(a1, b1, atol=eps))
         c2 = (np.allclose(a0, b1, atol=eps) and np.allclose(a1, b0, atol=eps))
         if not (c1 or c2):
-            seams.append(SeamPair(edge.index, v0.index, v1.index, a0, a1, b0, b1))
+            inward_a = _face_inward_uv(faces[0], uv_lay, a0, a1)
+            inward_b = _face_inward_uv(faces[1], uv_lay, b0, b1)
+            seams.append(SeamPair(
+                edge.index, v0.index, v1.index, a0, a1, b0, b1,
+                inward_a, inward_b))
     bm.free()
     return seams
 
 
 def _bilinear_sample(field: np.ndarray, uvs: np.ndarray, res: int) -> np.ndarray:
-    x = np.clip(uvs[:, 0] * res, 0, res - 1.001)
-    y = np.clip(uvs[:, 1] * res, 0, res - 1.001)
-    x0 = np.floor(x).astype(np.int64); x1 = x0 + 1
-    y0 = np.floor(y).astype(np.int64); y1 = y0 + 1
+    # Texel i is centred at (i + 0.5) / res.  Sampling with u*res (the old
+    # implementation) shifts every lookup by half a texel and reads farther
+    # outside an island exactly where seam fusion needs the most precision.
+    x = np.clip(uvs[:, 0] * res - 0.5, 0.0, res - 1.0)
+    y = np.clip(uvs[:, 1] * res - 0.5, 0.0, res - 1.0)
+    x0 = np.floor(x).astype(np.int64); x1 = np.minimum(x0 + 1, res - 1)
+    y0 = np.floor(y).astype(np.int64); y1 = np.minimum(y0 + 1, res - 1)
     fx = (x - x0).astype(np.float32); fy = (y - y0).astype(np.float32)
     a = field[y0, x0]; b = field[y0, x1]; c = field[y1, x0]; d = field[y1, x1]
     return (a * (1 - fx) * (1 - fy) + b * fx * (1 - fy)
             + c * (1 - fx) * fy + d * fx * fy)
-
-
-def _stamp_blend(field: np.ndarray, x: int, y: int, value: float, radius: int) -> None:
-    """Blend `value` into a radius-px disc around (x, y) with a linear falloff.
-
-    The centre takes `value`, the rim keeps the original texel, so a fused seam
-    fades in smoothly instead of stamping a hard ``(2r+1)`` block (which read as
-    a mosaic at low resolution). Writes in place.
-    """
-    res = field.shape[0]
-    x0 = max(0, x - radius); x1 = min(res, x + radius + 1)
-    y0 = max(0, y - radius); y1 = min(res, y + radius + 1)
-    if x1 <= x0 or y1 <= y0:
-        return
-    yy, xx = np.mgrid[y0:y1, x0:x1]
-    dist = np.sqrt((xx - x) ** 2 + (yy - y) ** 2)
-    w = np.clip(1.0 - dist / max(1.0, float(radius)), 0.0, 1.0)
-    region = field[y0:y1, x0:x1]
-    # Monotonic: only ever RAISE a texel toward `value`. A plain blend can lower
-    # a texel already raised by an earlier stamp (when a later sample's merged
-    # value is smaller), eroding the wear peak we are trying to preserve.
-    blended = region * (1.0 - w) + value * w
-    field[y0:y1, x0:x1] = np.maximum(region, blended)
 
 
 def seam_qa(field: np.ndarray, registry: List[SeamPair], res: int,
@@ -115,40 +121,76 @@ def seam_qa(field: np.ndarray, registry: List[SeamPair], res: int,
 
 
 def fuse_seam(field: np.ndarray, registry: List[SeamPair], res: int,
-              diffuse_texels: int = 8, tol: Optional[float] = None) -> np.ndarray:
-    """Fuse each seam: max-preserve + threshold-gate + distance-falloff blend.
+              diffuse_texels: int = 8, tol: Optional[float] = None,
+              valid: Optional[np.ndarray] = None) -> np.ndarray:
+    """Symmetrically reconcile corresponding strips on both sides of a seam.
 
-    A UV seam is two copies of the same 3D edge, so the two sides should agree.
-    Taking the *max* (not the mean) keeps the ridge wear peak — a seam is usually
-    a convex edge where wear is highest, and averaging the two sides would halve
-    it. The gate only touches texels where the sides actually disagree
-    (``|va-vb| > tol``), leaving already-continuous seams and clean faces alone;
-    the falloff blend fades the fix in rather than stamping a hard block.
+    The previous implementation sampled only the boundary, took ``max`` and
+    monotonically raised nearby texels.  That has incompatible meanings for the
+    three fields using it: a larger alpha means more wear, a larger
+    WearThreshold means *later* wear, and RGB stores a signed residual around
+    neutral 0.5.  It could reduce the exact A/B difference while creating the
+    bright seam band visible on the ceiling-fan base.
+
+    This implementation samples both islands at equal edge parameter and equal
+    inward texel distance, averages them symmetrically, and fades that common
+    profile back to the original signal.  Accumulation is order-independent so
+    intersecting seams cannot overwrite one another according to mesh order.
     """
-    out = field.copy()
+    original = np.asarray(field, dtype=np.float32)
     if not registry:
-        return out
-    radius = max(1, diffuse_texels // 4)
-    if tol is None:
-        tol = 0.02
-    t = np.linspace(0.05, 0.95, max(8, res // 16))
+        return original.copy()
+    tolerance = 0.02 if tol is None else float(tol)
+    width = max(1, int(diffuse_texels))
+    accum = np.zeros_like(original, dtype=np.float32)
+    weights = np.zeros_like(original, dtype=np.float32)
+
+    def _accumulate(uvs: np.ndarray, values: np.ndarray, strength: float) -> None:
+        inside = ((uvs[:, 0] >= 0.0) & (uvs[:, 0] <= 1.0)
+                  & (uvs[:, 1] >= 0.0) & (uvs[:, 1] <= 1.0))
+        xs = np.clip(np.floor(uvs[:, 0] * res).astype(np.int64), 0, res - 1)
+        ys = np.clip(np.floor(uvs[:, 1] * res).astype(np.int64), 0, res - 1)
+        if valid is not None:
+            inside &= valid[ys, xs]
+        if not inside.any():
+            return
+        xs = xs[inside]; ys = ys[inside]
+        vals = values[inside].astype(np.float32)
+        np.add.at(accum, (ys, xs), vals * strength)
+        np.add.at(weights, (ys, xs), strength)
+
     for sp in registry:
-        ua = sp.uv_a0[None] * (1 - t[:, None]) + sp.uv_a1[None] * t[:, None]
-        ub = sp.uv_b0[None] * (1 - t[:, None]) + sp.uv_b1[None] * t[:, None]
-        va = _bilinear_sample(out, ua, res)
-        vb = _bilinear_sample(out, ub, res)
-        merged = np.maximum(va, vb)  # keep the peak wear, don't average it away
-        active = np.abs(va - vb) > tol
-        for i in range(len(t)):
-            if not active[i]:
+        edge_texels = max(
+            float(np.linalg.norm(sp.uv_a1 - sp.uv_a0)),
+            float(np.linalg.norm(sp.uv_b1 - sp.uv_b0))) * res
+        sample_count = max(2, int(np.ceil(edge_texels * 2.0)) + 1)
+        t = np.linspace(0.0, 1.0, sample_count)
+        edge_a = sp.uv_a0[None] * (1.0 - t[:, None]) + sp.uv_a1[None] * t[:, None]
+        edge_b = sp.uv_b0[None] * (1.0 - t[:, None]) + sp.uv_b1[None] * t[:, None]
+        has_profile = sp.uv_a_inward is not None and sp.uv_b_inward is not None
+        max_distance = width if has_profile else 0
+        inward_a = (np.asarray(sp.uv_a_inward) if has_profile
+                    else np.zeros(2, dtype=np.float64))
+        inward_b = (np.asarray(sp.uv_b_inward) if has_profile
+                    else np.zeros(2, dtype=np.float64))
+        for distance in range(max_distance + 1):
+            ua = edge_a + inward_a[None] * (distance / res)
+            ub = edge_b + inward_b[None] * (distance / res)
+            va = _bilinear_sample(original, ua, res)
+            vb = _bilinear_sample(original, ub, res)
+            active = np.abs(va - vb) > tolerance
+            if not active.any():
                 continue
-            xi = int(np.clip(ua[i, 0] * res, 0, res - 1))
-            yi = int(np.clip(ua[i, 1] * res, 0, res - 1))
-            _stamp_blend(out, xi, yi, float(merged[i]), radius)
-            xi = int(np.clip(ub[i, 0] * res, 0, res - 1))
-            yi = int(np.clip(ub[i, 1] * res, 0, res - 1))
-            _stamp_blend(out, xi, yi, float(merged[i]), radius)
-    return out
+            merged = 0.5 * (va + vb)
+            strength = float(1.0 - distance / (max_distance + 1.0))
+            _accumulate(ua[active], merged[active], strength)
+            _accumulate(ub[active], merged[active], strength)
+
+    touched = weights > 1e-8
+    target = original.copy()
+    target[touched] = accum[touched] / weights[touched]
+    strength = np.clip(weights, 0.0, 1.0)
+    return original * (1.0 - strength) + target * strength
 
 
 def dilate(field: np.ndarray, valid: np.ndarray, steps: int) -> tuple:
@@ -178,8 +220,9 @@ def dilate(field: np.ndarray, valid: np.ndarray, steps: int) -> tuple:
 
 
 def fuse_seam_rgb(field_rgb: np.ndarray, registry: List[SeamPair], res: int,
-                  diffuse_texels: int = 8) -> np.ndarray:
-    """Robust-average both sides of each seam for an (res,res,C) texture.
+                  diffuse_texels: int = 8,
+                  valid: Optional[np.ndarray] = None) -> np.ndarray:
+    """Symmetrically fuse both sides of an (res,res,C) texture.
 
     fuse_seam/dilate are single-channel (they stamp scalars; np.where on
     (H,W,C) would broadcast-fail), so loop channels reusing the tested
@@ -190,7 +233,8 @@ def fuse_seam_rgb(field_rgb: np.ndarray, registry: List[SeamPair], res: int,
         return field_rgb.copy()
     out = np.empty_like(field_rgb)
     for c in range(field_rgb.shape[2]):
-        out[..., c] = fuse_seam(field_rgb[..., c], registry, res, diffuse_texels)
+        out[..., c] = fuse_seam(
+            field_rgb[..., c], registry, res, diffuse_texels, valid=valid)
     return out
 
 

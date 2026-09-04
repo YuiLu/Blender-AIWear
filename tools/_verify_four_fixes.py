@@ -2,7 +2,7 @@
 
 Runs under `blender -b --python` and prints PASS/FAIL lines:
   1. ai_wear registers; `texture_size` property is gone.
-  2. fuse_seam max-preserves + gates + falls off (synthetic registry).
+  2. fuse_seam symmetrically reconciles a narrow paired strip.
   3. passes.render_clean renders three lighting modes to distinct images.
 """
 import os
@@ -39,6 +39,7 @@ def check(name, ok, detail=""):
 s = bpy.context.scene.ai_wear
 check("texture_size property removed", not hasattr(s, "texture_size"))
 check("work_resolution still present", hasattr(s, "work_resolution"))
+check("safe padding default", s.padding_texels == 2, s.padding_texels)
 check("render_clean accepts lighting kwarg",
       "lighting" in passes.render_clean.__code__.co_varnames)
 check("fuse_seam accepts tol kwarg", "tol" in fuse_seam.__code__.co_varnames)
@@ -52,27 +53,32 @@ field[30:35, 12:20] = 0.8   # side A (high wear)
 field[30:35, 38:46] = 0.2   # side B (low wear)
 sp = SeamPair(0, 0, 1,
               np.array([0.20, 0.5]), np.array([0.30, 0.5]),
-              np.array([0.60, 0.5]), np.array([0.70, 0.5]))
+              np.array([0.60, 0.5]), np.array([0.70, 0.5]),
+              np.array([0.0, 1.0]), np.array([0.0, 1.0]))
 reg = [sp]
 
 before = seam_qa(field, reg, res)
 fused = fuse_seam(field, reg, res, diffuse_texels=8)
 after = seam_qa(fused, reg, res)
 
-peak_a = float(field[32, 16])         # side A centre value
-fused_b = float(fused[32, 41])        # side B centre value (should rise toward 0.8)
+fused_a = float(fused[32, 16])
+fused_b = float(fused[32, 41])
 check("fusion reduces seam diff", after["p95"] < before["p95"],
       f"p95 {before['p95']:.4f} -> {after['p95']:.4f}")
-check("peak wear preserved (not halved)", fused_b > 0.5 and peak_a > 0.5,
-      f"sideB {fused_b:.3f} (mean would be ~0.5)")
+check("fusion is symmetric (no max-biased bright line)",
+      abs(fused_a - fused_b) < 0.15 and fused_a < 0.75 and fused_b > 0.25,
+      f"sideA {fused_a:.3f}, sideB {fused_b:.3f}")
 
 # gate: a second field where sides already agree must NOT be smeared
 field2 = np.zeros((res, res), dtype=np.float32)
-field2[30:35, 12:20] = 0.8
-field2[30:35, 38:46] = 0.8   # already continuous
+# Include a one-texel guard around both segments so endpoint bilinear samples
+# see the same constant signal on both islands.
+field2[30:35, 11:21] = 0.8
+field2[30:35, 37:47] = 0.8   # already continuous
 sp2 = SeamPair(1, 0, 1,
                np.array([0.20, 0.5]), np.array([0.30, 0.5]),
-               np.array([0.60, 0.5]), np.array([0.70, 0.5]))
+               np.array([0.60, 0.5]), np.array([0.70, 0.5]),
+               np.array([0.0, 1.0]), np.array([0.0, 1.0]))
 fused2 = fuse_seam(field2, [sp2], res, diffuse_texels=8)
 check("gate leaves continuous seams alone", np.array_equal(fused2, field2))
 

@@ -211,8 +211,9 @@ class AIWearSceneSettings(PropertyGroup):
     use_padding: BoolProperty(
         name="Island Padding", default=True,
         description="Dilate valid UV islands after projection; independent of seam fusion for ablation")
-    padding_texels: IntProperty(name="Padding", default=16, min=0, max=64,
-                                 description="Island dilation to prevent bilinear/mipmap bleed")
+    padding_texels: IntProperty(
+        name="Padding", default=2, min=0, max=64,
+        description="Island dilation for filtering; values larger than the UV gutter can contaminate neighboring islands")
 
     # --- Experiments / ablation ------------------------------------------
     use_ai_mask: BoolProperty(
