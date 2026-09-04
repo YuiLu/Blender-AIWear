@@ -224,7 +224,7 @@ def _select_facing(texel_pos: np.ndarray, texel_norm: np.ndarray,
     # dot with the outward normal N is positive for front-facing texels. The
     # inverse (P - cam_loc) inverted the test and accumulated on back-facing
     # (occluded) texels only — vis*facing collapsed to ~1.8% of texels (only
-    # silhouette), so the AI mask never landed on the surface and WearTime had
+    # silhouette), so the AI mask never landed on the surface and WearThreshold had
     # to extrapolate from noise → blocky/mosaic result. (Turn-5 fix.)
     view_dir = cam_loc[None, :] - P_s
     vn = view_dir / (np.linalg.norm(view_dir, axis=1, keepdims=True) + 1e-12)

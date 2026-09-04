@@ -1,14 +1,14 @@
-"""Headless diagnostic for the gaming_console WearTime-all-black case.
+"""Headless diagnostic for the gaming_console WearThreshold-all-black case.
 
-Reproduces the EXACT downstream (mask -> projection -> fusion -> WearTime -> bake)
+Reproduces the EXACT downstream (mask -> projection -> fusion -> WearThreshold -> bake)
 on the real gaming_console object from its saved .blend, using the CACHED per-view
 clean/worn images + the SAVED camera matrices in views.json. No render, no AI.
 
 Dumps stats at every stage so we can see WHERE the field goes to zero, and saves:
   mask_V{i}.png     - the diff'd screen mask per view (the user's request)
   ai_field.png      - the fused multi-view field (what gets projected to vertices)
-  weartime_recomputed.png - WearTime as recomputed NOW (PNG16, in-memory values)
-  ondisk_stats      - min/max/mean/nz of the existing WearTime.png on disk
+  wearthreshold_recomputed.png - WearThreshold as recomputed NOW (PNG16, in-memory values)
+  ondisk_stats      - min/max/mean/nz of the existing WearThreshold.png on disk
   save_roundtrip    - proves save_image preserves non-zero (rules out encode bug)
 
 Run:
@@ -109,7 +109,7 @@ print(f"  in_tile_frac = {diag.get('base_in_tile_frac', -1):.4f}  "
       f"flipped = {diag.get('flipped_ratio', -1):.4f}")
 vcov = float(uvfield.valid.mean())
 print(f"  uvfield.valid.mean() = {vcov:.6f}  "
-      f"(<- if 0.0, bake_vertex_to_uv zeroes EVERYTHING => WearTime all-black)")
+      f"(<- if 0.0, bake_vertex_to_uv zeroes EVERYTHING => WearThreshold all-black)")
 
 texel_pos = uvfield.reconstruct_positions().reshape(-1, 3)
 texel_norm = uvfield.reconstruct_normals().reshape(-1, 3)
@@ -197,8 +197,8 @@ while stack:
 print(f"  graph connectivity: {len(seen)}/{len(adj)} verts reachable from v0 "
       f"({'CONNECTED' if len(seen)==len(adj) else 'DISCONNECTED — see below'})")
 
-# --- 5. WearTime growth (mirrors build_weartime_from_graph, staged) ---
-print("\n========== 5. WEARTIME GROWTH (staged) ==========")
+# --- 5. WearThreshold growth (mirrors build_wearthreshold_from_graph, staged) ---
+print("\n========== 5. WEARTHRESHOLD GROWTH (staged) ==========")
 weights = dict(w_ai=0.6, w_convex=0.3, w_expose=0.2, w_cavity=0.2)
 gamma = 2.0; alpha = 0.7
 noise_amp = 0.12; noise_scale = 8.0
@@ -231,25 +231,25 @@ stats(T, "T(vertex) pre-smooth")
 T = wear_growth._smooth_field(T, adj, iterations=2)
 stats(T, "T(vertex) post-smooth")
 
-weartime_uv = wear_growth.bake_vertex_to_uv(uvfield, T)
-stats(weartime_uv, "weartime_uv(baked)")
-save_dbg(np.clip(weartime_uv, 0, 1), "weartime_recomputed.png")
+wearthreshold_uv = wear_growth.bake_vertex_to_uv(uvfield, T)
+stats(wearthreshold_uv, "wearthreshold_uv(baked)")
+save_dbg(np.clip(wearthreshold_uv, 0, 1), "wearthreshold_recomputed.png")
 
 # the catch-all condition
-print(f"\n  >>> catch-all `not weartime_uv.any()` = {not bool(weartime_uv.any())} "
+print(f"\n  >>> catch-all `not wearthreshold_uv.any()` = {not bool(wearthreshold_uv.any())} "
       f"(if True, the all-zero guard WOULD have fired)")
 
-# --- 6. compare to on-disk WearTime.png ---
-print("\n========== 6. ON-DISK WearTime.png ==========")
-on_disk = os.path.join(CACHE, "WearTime.png")
+# --- 6. compare to on-disk WearThreshold.png ---
+print("\n========== 6. ON-DISK WearThreshold.png ==========")
+on_disk = os.path.join(CACHE, "WearThreshold.png")
 if os.path.isfile(on_disk):
     arr = utils.load_image_rgba(on_disk)
     g = arr[..., :3].mean(-1)
-    stats(g, "WearTime.png(disk)")
+    stats(g, "WearThreshold.png(disk)")
     print(f"  file size = {os.path.getsize(on_disk)} bytes")
     print(f"  visually-black? {g.max() < 0.01}  truly-zero? {g.max() < 1e-6}")
 else:
-    print("  no WearTime.png on disk")
+    print("  no WearThreshold.png on disk")
 
 # --- 7. save_image roundtrip: prove encode preserves non-zero ---
 print("\n========== 7. save_image ROUNDTRIP (encode sanity) ==========")
@@ -273,23 +273,23 @@ print(f"  PNG16 preserves non-zero 0.5 -> {float(pa[::4,::4,0].max()):.4f} "
       f"(encode is {'OK' if pa[::4,::4,0].max() > 0.4 else 'BROKEN'})")
 bpy.data.images.remove(pimg)
 
-# --- 8. write the regenerated WearTime to the CANONICAL path + verify ---
-print("\n========== 8. WRITE CANONICAL WearTime.png + VERIFY ==========")
-weartime_path = os.path.join(CACHE, "WearTime.png")
-utils.save_image(weartime_path, np.clip(weartime_uv, 0, 1), "PNG16")
-print(f"  wrote {weartime_path} ({os.path.getsize(weartime_path)} bytes)")
+# --- 8. write the regenerated WearThreshold to the CANONICAL path + verify ---
+print("\n========== 8. WRITE CANONICAL WearThreshold.png + VERIFY ==========")
+wearthreshold_path = os.path.join(CACHE, "WearThreshold.png")
+utils.save_image(wearthreshold_path, np.clip(wearthreshold_uv, 0, 1), "PNG16")
+print(f"  wrote {wearthreshold_path} ({os.path.getsize(wearthreshold_path)} bytes)")
 # reload as Non-Color (the way the shader reads it) and check channels
-vimg = bpy.data.images.load(weartime_path, check_existing=False)
+vimg = bpy.data.images.load(wearthreshold_path, check_existing=False)
 vimg.colorspace_settings.name = "Non-Color"
 vbuf = np.empty(len(vimg.pixels), dtype=np.float32)
 vimg.pixels.foreach_get(vbuf)
 va = vbuf.reshape(vimg.size[1], vimg.size[0], 4)[::-1]
-print(f"  canonical WearTime reload (Non-Color): "
+print(f"  canonical WearThreshold reload (Non-Color): "
       f"R[{va[...,0].min():.4f},{va[...,0].max():.4f}] "
       f"mean={va[...,0].mean():.4f} nz={int((va[...,0]>1e-6).sum())}/{va[...,0].size}")
-print(f"  in-memory weartime_uv: min={weartime_uv.min():.4f} max={weartime_uv.max():.4f} "
-      f"mean={weartime_uv.mean():.4f}")
-print(f"  >>> WearTime is {'NON-BLACK (FIXED)' if va[...,0].max() > 0.05 else 'STILL BLACK'}")
+print(f"  in-memory wearthreshold_uv: min={wearthreshold_uv.min():.4f} max={wearthreshold_uv.max():.4f} "
+      f"mean={wearthreshold_uv.mean():.4f}")
+print(f"  >>> WearThreshold is {'NON-BLACK (FIXED)' if va[...,0].max() > 0.05 else 'STILL BLACK'}")
 bpy.data.images.remove(vimg)
 
 # verify the diff masks the user wanted are non-black now
@@ -306,13 +306,13 @@ for i in range(6):
     bpy.data.images.remove(mi)
 
 # --- 9. write the NEW canonical textures (reprojected mask + worn texture) ---
-print("\n========== 9. CANONICAL AIWear_Mask.png + AIWear_WornTex.png ==========")
-mask_path = os.path.join(CACHE, "AIWear_Mask.png")
+print("\n========== 9. CANONICAL M_Wear.png + AIWear_WornTex.png ==========")
+m_wear_path = os.path.join(CACHE, "M_Wear.png")
 mask_rgba = np.zeros((RES, RES, 4), dtype=np.float32)
 mask_rgba[..., 0] = mask_rgba[..., 1] = mask_rgba[..., 2] = np.clip(ai_field, 0, 1)
 mask_rgba[..., 3] = 1.0
-utils.save_image(mask_path, mask_rgba, "PNG16")
-print(f"  wrote {mask_path} ({os.path.getsize(mask_path)} bytes)")
+utils.save_image(m_wear_path, mask_rgba, "PNG16")
+print(f"  wrote {m_wear_path} ({os.path.getsize(m_wear_path)} bytes)")
 
 worn_tex_path = os.path.join(CACHE, "AIWear_WornTex.png")
 wtex = np.zeros((RES, RES, 4), dtype=np.float32)
@@ -322,13 +322,13 @@ utils.save_image(worn_tex_path, wtex, "PNG16")
 print(f"  wrote {worn_tex_path} ({os.path.getsize(worn_tex_path)} bytes)")
 
 # round-trip: reload each the way the shader reads them, compare to in-memory
-mimg = bpy.data.images.load(mask_path, check_existing=False)
+mimg = bpy.data.images.load(m_wear_path, check_existing=False)
 mimg.colorspace_settings.name = "Non-Color"
 mbuf = np.empty(len(mimg.pixels), dtype=np.float32)
 mimg.pixels.foreach_get(mbuf)
 ma2 = mbuf.reshape(mimg.size[1], mimg.size[0], 4)[::-1]
 rmse_mask = float(np.sqrt(np.mean((ma2[..., 0] - np.clip(ai_field, 0, 1).astype(np.float32)) ** 2)))
-print(f"  AIWear_Mask.png round-trip (Non-Color): R mean in-mem={ai_field.mean():.4f} "
+print(f"  M_Wear.png round-trip (Non-Color): R mean in-mem={ai_field.mean():.4f} "
       f"reloaded={ma2[...,0].mean():.4f} rmse={rmse_mask:.5f} -> "
       f"{'OK' if rmse_mask < 0.01 else 'MISMATCH'}")
 bpy.data.images.remove(mimg)

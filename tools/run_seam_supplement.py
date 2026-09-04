@@ -75,10 +75,10 @@ def _qa_rgb(field: np.ndarray, registry, res: int) -> dict:
     }
 
 
-def _pair_risks(weartime: np.ndarray, worn: np.ndarray, registry, res: int):
+def _pair_risks(wearthreshold: np.ndarray, worn: np.ndarray, registry, res: int):
     risks = []
     t = np.linspace(0.05, 0.95, 24)
-    fields = [weartime, worn[..., 3], worn[..., 0], worn[..., 1], worn[..., 2]]
+    fields = [wearthreshold, worn[..., 3], worn[..., 0], worn[..., 1], worn[..., 2]]
     for pair in registry:
         ua = pair.uv_a0[None] * (1 - t[:, None]) + pair.uv_a1[None] * t[:, None]
         ub = pair.uv_b0[None] * (1 - t[:, None]) + pair.uv_b1[None] * t[:, None]
@@ -188,8 +188,8 @@ result_dir = cache_dir / ("supplemental_seam_retest_" + stamp)
 result_dir.mkdir(parents=True, exist_ok=False)
 
 canonical = [manifest_path, cache_dir / "AIWear_UVSnapshot.npz",
-             cache_dir / "WearTime.png",
-             cache_dir / "AIWear_Mask.png", cache_dir / "AIWear_WornTex.png"]
+             cache_dir / "WearThreshold.png",
+             cache_dir / "M_Wear.png", cache_dir / "AIWear_WornTex.png"]
 canonical += sorted(views_dir.glob("diff_mask_V*.png"))
 
 summary = {
@@ -218,7 +218,7 @@ with tempfile.TemporaryDirectory(prefix="aiwear_seam_backup_") as backup_name:
 
     camera = None
     overlay_objects = []
-    raw_weartime = None
+    raw_wearthreshold = None
     raw_worn = None
     registry = None
     try:
@@ -245,12 +245,12 @@ with tempfile.TemporaryDirectory(prefix="aiwear_seam_backup_") as backup_name:
 
             arm_dir = result_dir / label
             arm_dir.mkdir()
-            for filename in ("WearTime.png", "AIWear_Mask.png", "AIWear_WornTex.png"):
+            for filename in ("WearThreshold.png", "M_Wear.png", "AIWear_WornTex.png"):
                 shutil.copy2(cache_dir / filename, arm_dir / filename)
             render_path = arm_dir / "render_model.png"
             passes.render_clean(scene, camera, str(render_path), 1024)
 
-            weartime = _load_uv_rgba(cache_dir / "WearTime.png")[..., 0]
+            wearthreshold = _load_uv_rgba(cache_dir / "WearThreshold.png")[..., 0]
             worn = _load_uv_rgba(cache_dir / "AIWear_WornTex.png")
             if registry is None:
                 registry = seam_registry.build_seam_registry(obj, "AI_WearUV")
@@ -260,27 +260,27 @@ with tempfile.TemporaryDirectory(prefix="aiwear_seam_backup_") as backup_name:
                 "padding": use_padding,
                 "padding_texels": 16 if use_padding else 0,
                 "elapsed_seconds": round(elapsed, 3),
-                "weartime": seam_registry.seam_qa(weartime, registry, 256),
+                "wearthreshold": seam_registry.seam_qa(wearthreshold, registry, 256),
                 "worn_alpha": seam_registry.seam_qa(worn[..., 3], registry, 256),
                 "worn_rgb": _qa_rgb(worn[..., :3], registry, 256),
                 "render": str(render_path),
             }
             if label == "raw":
-                raw_weartime = weartime.copy()
+                raw_wearthreshold = wearthreshold.copy()
                 raw_worn = worn.copy()
 
-        assert registry is not None and raw_weartime is not None and raw_worn is not None
-        risks = _pair_risks(raw_weartime, raw_worn, registry, 256)
+        assert registry is not None and raw_wearthreshold is not None and raw_worn is not None
+        risks = _pair_risks(raw_wearthreshold, raw_worn, registry, 256)
         threshold = float(np.percentile(risks, 90))
         risk_pairs = [pair for pair, risk in zip(registry, risks) if risk >= threshold]
         summary["risk_overlay"] = {
-            "definition": "top 10% seam edges by max p95 mismatch across raw WearTime, WornTex alpha and RGB",
+            "definition": "top 10% seam edges by max p95 mismatch across raw WearThreshold, WornTex alpha and RGB",
             "threshold": threshold,
             "edge_count": len(risk_pairs),
         }
 
         _save_uv_overlay(result_dir / "seam_edges_uv_overlay.png",
-                         raw_weartime, registry, 256)
+                         raw_wearthreshold, registry, 256)
         all_overlay = _seam_curve(obj, registry, "AIWear_AllUVSeams",
                                   (1.0, 0.02, 0.02), radius * 0.0022)
         overlay_objects.append(all_overlay)

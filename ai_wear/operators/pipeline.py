@@ -121,7 +121,6 @@ def snapshot_context(context) -> dict:
         "uv_mode": s.uv_mode,
         "target_uv_layer": s.target_uv_layer,
         "work_resolution": s.work_resolution,
-        "texture_size": s.texture_size,
         "camera_preset": s.camera_preset,
         "camera_count": s.camera_count,
         "render_resolution": s.render_resolution,
@@ -194,7 +193,7 @@ def _uv_coverage_diag(obj, layer_name, uvfield) -> dict:
 
     Returns a plain dict the worker thread can read to build an error message.
     The key fact is `valid_count`: if 0, bake_vertex_to_uv produces an all-zero
-    WearTime (it zeroes every invalid texel), so the run must stop here instead
+    WearThreshold (it zeroes every invalid texel), so the run must stop here instead
     of silently baking a useless all-black texture.
     """
     import numpy as np
@@ -252,7 +251,7 @@ def _uv_empty_error_msg(obj_name: str, diag: dict) -> str:
         why = ("The UV layer has coordinates but no triangle covered a texel — "
                "possibly all zero-area (degenerate) UV triangles. Re-unwrap.")
     return (
-        f"UV rasterization covered 0 of {diag['total']} texels — WearTime would "
+        f"UV rasterization covered 0 of {diag['total']} texels — WearThreshold would "
         f"be all-black (and the render would read as fully worn everywhere), so the "
         f"pipeline stopped. Layer '{diag['layer']}' on '{obj_name}': base UV range "
         f"[{diag.get('base_uv_min', 0.0):.3f}, {diag.get('base_uv_max', 0.0):.3f}], "
@@ -379,7 +378,7 @@ def _select_view_context(mode: str, supported: bool,
 
 def _experiment_config(snap: dict, n_views: int, replayed: bool) -> dict:
     keys = (
-        "uv_mode", "target_uv_layer", "work_resolution", "texture_size",
+        "uv_mode", "target_uv_layer", "work_resolution",
         "camera_preset", "camera_count", "render_resolution", "view_context_mode", "provider",
         "model", "strategy", "prompt", "seed", "lock_seed", "weights",
         "gamma", "alpha", "noise_amp", "noise_scale", "use_barrier",
@@ -397,8 +396,8 @@ def _experiment_config(snap: dict, n_views: int, replayed: bool) -> dict:
 
 def _save_experiment_bundle(cache_dir: str, snap: dict, job,
                             n_views: int, ai_field: np.ndarray,
-                            weartime_before: np.ndarray,
-                            weartime_after: np.ndarray,
+                            wearthreshold_before: np.ndarray,
+                            wearthreshold_after: np.ndarray,
                             replayed: bool) -> str:
     """Persist comparable ablation inputs/outputs without changing main outputs."""
     import json
@@ -416,10 +415,10 @@ def _save_experiment_bundle(cache_dir: str, snap: dict, job,
         rgba[..., 3] = 1.0
         _save_uv_texture(os.path.join(exp_dir, name), rgba, "PNG16")
 
-    _gray(ai_field, "AIWear_Mask.png")
-    _gray(weartime_before, "WearTime_before_seam_padding.png")
-    _gray(weartime_after, "WearTime_after_seam_padding.png")
-    for name in ("WearTime.png", "AIWear_WornTex.png", "AIWear_UVSnapshot.npz"):
+    _gray(ai_field, "M_Wear.png")
+    _gray(wearthreshold_before, "WearThreshold_before_seam_padding.png")
+    _gray(wearthreshold_after, "WearThreshold_after_seam_padding.png")
+    for name in ("WearThreshold.png", "AIWear_WornTex.png", "AIWear_UVSnapshot.npz"):
         src = os.path.join(cache_dir, name)
         if os.path.isfile(src):
             shutil.copy2(src, os.path.join(exp_dir, name))
@@ -565,7 +564,7 @@ def _step_preflight(snap, job, bridge):
         else:
             ok, layer, uvr = unwrap_blender.setup_mode_b(
                 obj, snap["target_uv_layer"] or "AI_WearUV",
-                snap["texture_size"], depsgraph=bpy.context.evaluated_depsgraph_get())
+                snap["work_resolution"], depsgraph=bpy.context.evaluated_depsgraph_get())
             report["uv_qc"] = uvr
             if not uvr.get("ok"):
                 job.message = f"Mode B UV QC warns: overlap={uvr.get('overlap_ratio',0):.2%}"
@@ -583,6 +582,32 @@ def _step_preflight(snap, job, bridge):
     return bridge.run(_do)
 
 
+def _save_oblique_preview(obj_name, cache_dir, snap, bridge):
+    """Render a fixed oblique comparison shot after a successful run.
+
+    Best-effort: a failed comparison render must never fail the run. The wear
+    overlay is already attached to the object by this point, so the fixed
+    oblique camera captures the actual worn result. Named by the experiment
+    label under ``<cache>/experiments/oblique_renders`` so consecutive runs are
+    directly comparable (identical framing, preset-aligned filename).
+    """
+    def _render():
+        import bpy
+        obj = bpy.data.objects.get(obj_name)
+        if obj is None or obj.type != "MESH":
+            return
+        from ..render import oblique
+        label = utils.safe_name(snap.get("experiment_label") or "render")
+        out_dir = os.path.join(cache_dir, "experiments", "oblique_renders")
+        oblique.render_oblique(bpy.context.scene, obj,
+                               os.path.join(out_dir, label + "_oblique.png"))
+    try:
+        bridge.run(_render)
+    except Exception:
+        # A comparison shot must not break a successful run.
+        traceback.print_exc()
+
+
 def _run_pipeline(job, snap, bridge):
     """The full worker pipeline. May only touch bpy via bridge.run()."""
     import bpy
@@ -596,6 +621,11 @@ def _run_pipeline(job, snap, bridge):
     from ..shader import wear_nodegroup as shader
 
     ai_base.ensure_providers_registered()
+
+    # A full Generate replaces the replay source and main outputs. Preserve
+    # only explicit experiment snapshots; Replay itself never calls this path.
+    cache_dir = job_cache.clear_current_run(snap["obj_uuid"])
+    job.meta["cache_dir"] = cache_dir
 
     # 1. Preflight + UV
     job.state = JobState.RENDER; job.stage = JobStage.PREFLIGHT
@@ -669,8 +699,7 @@ def _run_pipeline(job, snap, bridge):
     # commonly needs no key.
     _require_api_key(snap["provider"], snap["prefs_obj"])
 
-    # cache dirs
-    cache_dir = job_cache.object_cache_dir(snap["obj_uuid"])
+    # cache dirs (the non-experiment contents were cleared at run start)
     out_dir = os.path.join(cache_dir, "views")
     utils.ensure_dir(out_dir)
     uv_snapshot_path = os.path.join(cache_dir, UV_SNAPSHOT_FILENAME)
@@ -691,7 +720,7 @@ def _run_pipeline(job, snap, bridge):
     job.meta["view_context_mode"] = context_mode
     job.meta["view_context_supported"] = context_supported
     # Per-view projection records, saved to views.json so the downstream
-    # (mask → projection → fusion → WearTime → bake) can be replayed later
+    # (mask → projection → fusion → WearThreshold → bake) can be replayed later
     # WITHOUT re-running AI: the replay reuses the exact camera matrices the
     # clean/worn images were rendered from (regenerating cameras would give a
     # different framing — esp. after the half-diagonal framing fix — and the
@@ -704,7 +733,8 @@ def _run_pipeline(job, snap, bridge):
         job.progress = 0.08 + 0.45 * (vi / max(1, n_views))
         clean_png = os.path.join(out_dir, f"clean_V{vi}.png")
         bridge.run(lambda cn=cam_name, cp=clean_png: passes.render_clean(
-            bpy.context.scene, bpy.data.objects.get(cn), cp, snap["render_resolution"], job))
+            bpy.context.scene, bpy.data.objects.get(cn), cp, snap["render_resolution"], job,
+            lighting="unlit", unlit_object=bpy.data.objects.get(obj_name)))
 
         # Projection/depth are known before AI. ComfyUI can therefore receive a
         # deterministic geometry-derived inpaint mask rather than repainting the
@@ -883,31 +913,31 @@ def _run_pipeline(job, snap, bridge):
         bpy.data.objects.get(obj_name)))
     adj, world = adj_world
 
-    # 6. WearTime
+    # 6. WearThreshold
     _check_cancel(job)
-    job.message = "Growing WearTime topology field…"; job.progress = 0.70
+    job.message = "Growing WearThreshold topology field…"; job.progress = 0.70
     effective_weights = _effective_weights(snap)
     if snap.get("use_topology_growth", True):
-        wt = wear_growth.build_weartime_from_graph(
+        wt = wear_growth.build_wearthreshold_from_graph(
             uvfield, ai_field, convexity, exposure, adj, world,
             effective_weights, snap["gamma"], snap["alpha"],
             snap["noise_amp"], snap["noise_scale"], snap["use_barrier"],
             snap["mat_penalty"], base_seed,
             float(np.linalg.norm(world.max(0)-world.min(0))))
     else:
-        wt = wear_growth.build_direct_weartime(
+        wt = wear_growth.build_direct_wearthreshold(
             uvfield, ai_field, convexity, exposure, effective_weights,
             snap["noise_amp"], snap["noise_scale"], base_seed, world)
-    weartime_uv = wt["weartime_uv"]
-    weartime_before_post = weartime_uv.copy()
+    wearthreshold_uv = wt["wearthreshold_uv"]
+    wearthreshold_before_post = wearthreshold_uv.copy()
 
     # 7. Seam fusion and island padding are independent ablation switches.
     if snap["seam_fuse"]:
         job.message = "Fusing UV seams…"; job.progress = 0.80
         registry = bridge.run(lambda: seam_registry.build_seam_registry(
             bpy.data.objects.get(obj_name), layer_name))
-        qa_before = seam_registry.seam_qa(weartime_uv, registry, res)
-        weartime_uv = seam_registry.fuse_seam(weartime_uv, registry, res, snap["seam_diffuse"])
+        qa_before = seam_registry.seam_qa(wearthreshold_uv, registry, res)
+        wearthreshold_uv = seam_registry.fuse_seam(wearthreshold_uv, registry, res, snap["seam_diffuse"])
         worn_uv = seam_registry.fuse_seam_rgb(worn_uv, registry, res, snap["seam_diffuse"])
         wear_alpha = seam_registry.fuse_seam(
             wear_alpha, registry, res, snap["seam_diffuse"])
@@ -916,34 +946,34 @@ def _run_pipeline(job, snap, bridge):
             bpy.data.objects.get(obj_name), registry))
     if snap.get("use_padding", True) and snap["padding"] > 0:
         job.message = "Padding UV islands…"; job.progress = 0.84
-        weartime_uv, _valid2 = seam_registry.dilate(
-            weartime_uv, uvfield.valid, snap["padding"])
+        wearthreshold_uv, _valid2 = seam_registry.dilate(
+            wearthreshold_uv, uvfield.valid, snap["padding"])
         worn_uv, _rgb_valid2 = seam_registry.dilate_rgb(
             worn_uv, rgb_valid, snap["padding"])
         wear_alpha, _wear_valid2 = seam_registry.dilate(
             wear_alpha, rgb_valid, snap["padding"])
     if snap["seam_fuse"]:
-        qa_after = seam_registry.seam_qa(weartime_uv, registry, res)
+        qa_after = seam_registry.seam_qa(wearthreshold_uv, registry, res)
         job.meta["seam_after_p95"] = qa_after["p95"]
 
-    # 8. Bake WearTime to image + attach shader (main thread)
-    job.state = JobState.BAKE; job.message = "Baking WearTime texture…"; job.progress = 0.90
-    # Catch-all: an all-zero WearTime makes the shader read every surface as
+    # 8. Bake WearThreshold to image + attach shader (main thread)
+    job.state = JobState.BAKE; job.message = "Baking WearThreshold texture…"; job.progress = 0.90
+    # Catch-all: an all-zero WearThreshold makes the shader read every surface as
     # fully worn (T=0 <= wear_amount -> smoothstep -> 1 -> all dark). The early
     # uvfield.valid guard catches the most common cause (no UV coverage); this
     # catches the rarer ones — e.g. alpha=1.0 + noise_amp=0.0 on a mesh whose
     # Dijkstra arrival distance is uniform (single component / all verts equidistant
     # from the seed) so T_base collapses to 0. Stop here rather than ship black.
-    if not weartime_uv.any():
+    if not wearthreshold_uv.any():
         vcov = float(uvfield.valid.mean()) if uvfield.valid.size else 0.0
-        T_vert = wt.get("weartime_vertex")
+        T_vert = wt.get("wearthreshold_vertex")
         t_min = float(T_vert.min()) if T_vert is not None else float("nan")
         t_max = float(T_vert.max()) if T_vert is not None else float("nan")
         raise RuntimeError(
-            f"WearTime came out all-zero — the render would read as fully worn "
+            f"WearThreshold came out all-zero — the render would read as fully worn "
             f"everywhere, so stopping instead of baking a useless texture. UV "
             f"coverage was {vcov*100:.1f}% (UV was fine); the collapse is in the "
-            f"topology-growth step. Vertex WearTime T range [{t_min:.4f}, {t_max:.4f}]. "
+            f"topology-growth step. Vertex WearThreshold T range [{t_min:.4f}, {t_max:.4f}]. "
             f"Most likely: alpha=1.0 with noise_amp=0.0 on a mesh where Dijkstra "
             f"arrival distance is uniform (single disconnected component, or all "
             f"verts equidistant from the seed). Fix: lower alpha toward 0.5–0.7, "
@@ -952,18 +982,18 @@ def _run_pipeline(job, snap, bridge):
         )
     fmt = "PNG16" if snap["export_format"] == "PNG16" else ("EXR" if snap["export_format"] == "EXR" else "PNG8")
     rgba = np.zeros((res, res, 4), dtype=np.float32)
-    rgba[..., 0] = weartime_uv; rgba[..., 1] = weartime_uv
-    rgba[..., 2] = weartime_uv; rgba[..., 3] = 1.0
-    weartime_path = os.path.join(cache_dir, "WearTime.png")
-    bridge.run(lambda: _save_uv_texture(weartime_path, rgba, fmt))
-    # AIWear_Mask.png — the directly-reprojected wear mask (the "重投影完的
-    # mask"). Persisted for QA/production (the shader gate is WearTime, but the
+    rgba[..., 0] = wearthreshold_uv; rgba[..., 1] = wearthreshold_uv
+    rgba[..., 2] = wearthreshold_uv; rgba[..., 3] = 1.0
+    wearthreshold_path = os.path.join(cache_dir, "WearThreshold.png")
+    bridge.run(lambda: _save_uv_texture(wearthreshold_path, rgba, fmt))
+    # M_Wear.png — the directly-reprojected wear mask (the "重投影完的
+    # mask"). Persisted for QA/production (the shader gate is WearThreshold, but the
     # user asked where the reprojected mask lives — here it is).
     mask_rgba = np.zeros((res, res, 4), dtype=np.float32)
     mask_rgba[..., 0] = ai_field; mask_rgba[..., 1] = ai_field
     mask_rgba[..., 2] = ai_field; mask_rgba[..., 3] = 1.0
-    mask_path = os.path.join(cache_dir, "AIWear_Mask.png")
-    bridge.run(lambda: _save_uv_texture(mask_path, mask_rgba, fmt))
+    m_wear_path = os.path.join(cache_dir, "M_Wear.png")
+    bridge.run(lambda: _save_uv_texture(m_wear_path, mask_rgba, fmt))
     # AIWear_WornTex.png — bounded encoded clean→worn color residual.
     # RGB: 0.5 + 0.5*clamped_delta, so 0.5 is neutral; A: actual AI wear
     # evidence. Camera coverage must never be used as the appearance alpha.
@@ -978,8 +1008,8 @@ def _run_pipeline(job, snap, bridge):
     job.message = "Attaching wear overlay shader…"; job.progress = 0.95
 
     def _attach():
-        wt_img = bpy.data.images.load(weartime_path)
-        wt_img.name = "AIWear_WearTime"
+        wt_img = bpy.data.images.load(wearthreshold_path)
+        wt_img.name = "AIWear_WearThreshold"
         wt_img.colorspace_settings.name = "Non-Color"
         worn_img = bpy.data.images.load(worn_tex_path)
         worn_img.name = "AIWear_WornTex"
@@ -996,17 +1026,18 @@ def _run_pipeline(job, snap, bridge):
         return mats
     bridge.run(_attach)
 
-    job.meta["weartime_path"] = weartime_path
+    job.meta["wearthreshold_path"] = wearthreshold_path
     job.meta["worn_tex_path"] = worn_tex_path
-    job.meta["worn_mask_path"] = mask_path
+    job.meta["m_wear_path"] = m_wear_path
     job.meta["worn_views"] = worn_paths
     job.meta["diff_masks"] = [os.path.join(out_dir, f"diff_mask_V{i}.png")
                               for i in range(n_views)]
     if snap.get("save_experiment_snapshot", False):
         exp_dir = _save_experiment_bundle(
             cache_dir, snap, job, n_views, ai_field,
-            weartime_before_post, weartime_uv, replayed=False)
+            wearthreshold_before_post, wearthreshold_uv, replayed=False)
         job.meta["experiment_dir"] = exp_dir
+    _save_oblique_preview(obj_name, cache_dir, snap, bridge)
     job.state = JobState.DONE
     job.stage = JobStage.EXPORT
     job.progress = 1.0
@@ -1014,11 +1045,11 @@ def _run_pipeline(job, snap, bridge):
 
 
 def _run_replay(job, snap, bridge):
-    """Replay ONLY the downstream (mask → projection → fusion → WearTime → bake
+    """Replay ONLY the downstream (mask → projection → fusion → WearThreshold → bake
     → shader) from the cached per-view clean/worn images + the saved camera
     matrices (views.json). No render, no AI. This is the per-stage testing
     workflow (Q3): once a known-good AI pass is cached, you can iterate on the
-    surface field / WearTime parameters without spending API budget.
+    surface field / WearThreshold parameters without spending API budget.
 
     Mirrors _run_pipeline's downstream exactly so the result is comparable.
     """
@@ -1171,32 +1202,32 @@ def _run_replay(job, snap, bridge):
     adj, world = bridge.run(lambda: wear_growth.build_topology_graph(
         bpy.data.objects.get(obj_name)))
 
-    # WearTime
+    # WearThreshold
     _check_cancel(job)
-    job.message = "Replay: growing WearTime field…"; job.progress = 0.72
+    job.message = "Replay: growing WearThreshold field…"; job.progress = 0.72
     base_seed = snap["seed"] if (snap["seed"] and snap["lock_seed"]) else 0
     effective_weights = _effective_weights(snap)
     if snap.get("use_topology_growth", True):
-        wt = wear_growth.build_weartime_from_graph(
+        wt = wear_growth.build_wearthreshold_from_graph(
             uvfield, ai_field, convexity, exposure, adj, world,
             effective_weights, snap["gamma"], snap["alpha"],
             snap["noise_amp"], snap["noise_scale"], snap["use_barrier"],
             snap["mat_penalty"], base_seed,
             float(np.linalg.norm(world.max(0)-world.min(0))))
     else:
-        wt = wear_growth.build_direct_weartime(
+        wt = wear_growth.build_direct_wearthreshold(
             uvfield, ai_field, convexity, exposure, effective_weights,
             snap["noise_amp"], snap["noise_scale"], base_seed, world)
-    weartime_uv = wt["weartime_uv"]
-    weartime_before_post = weartime_uv.copy()
+    wearthreshold_uv = wt["wearthreshold_uv"]
+    wearthreshold_before_post = wearthreshold_uv.copy()
 
     # Seam fusion and island padding are independent ablation switches.
     if snap["seam_fuse"]:
         job.message = "Replay: fusing seams…"; job.progress = 0.82
         registry = bridge.run(lambda: seam_registry.build_seam_registry(
             bpy.data.objects.get(obj_name), layer_name))
-        qa_before = seam_registry.seam_qa(weartime_uv, registry, res)
-        weartime_uv = seam_registry.fuse_seam(weartime_uv, registry, res, snap["seam_diffuse"])
+        qa_before = seam_registry.seam_qa(wearthreshold_uv, registry, res)
+        wearthreshold_uv = seam_registry.fuse_seam(wearthreshold_uv, registry, res, snap["seam_diffuse"])
         worn_uv = seam_registry.fuse_seam_rgb(worn_uv, registry, res, snap["seam_diffuse"])
         wear_alpha = seam_registry.fuse_seam(
             wear_alpha, registry, res, snap["seam_diffuse"])
@@ -1205,38 +1236,38 @@ def _run_replay(job, snap, bridge):
             bpy.data.objects.get(obj_name), registry))
     if snap.get("use_padding", True) and snap["padding"] > 0:
         job.message = "Replay: padding UV islands…"; job.progress = 0.86
-        weartime_uv, _valid2 = seam_registry.dilate(
-            weartime_uv, uvfield.valid, snap["padding"])
+        wearthreshold_uv, _valid2 = seam_registry.dilate(
+            wearthreshold_uv, uvfield.valid, snap["padding"])
         worn_uv, _rgb_valid2 = seam_registry.dilate_rgb(
             worn_uv, rgb_valid, snap["padding"])
         wear_alpha, _wear_valid2 = seam_registry.dilate(
             wear_alpha, rgb_valid, snap["padding"])
     if snap["seam_fuse"]:
-        qa_after = seam_registry.seam_qa(weartime_uv, registry, res)
+        qa_after = seam_registry.seam_qa(wearthreshold_uv, registry, res)
         job.meta["seam_after_p95"] = qa_after["p95"]
 
     # Bake + attach shader
-    job.state = JobState.BAKE; job.message = "Replay: baking WearTime…"; job.progress = 0.92
-    if not weartime_uv.any():
+    job.state = JobState.BAKE; job.message = "Replay: baking WearThreshold…"; job.progress = 0.92
+    if not wearthreshold_uv.any():
         raise RuntimeError(
-            "Replay: WearTime came out all-zero (render would read as fully worn). "
+            "Replay: WearThreshold came out all-zero (render would read as fully worn). "
             "UV coverage was fine; the topology-growth collapsed — see the full "
             "pipeline's all-zero guard for the param fixes (lower alpha, raise "
             "noise_amp, check mesh connectivity).")
     fmt = "PNG16" if snap["export_format"] == "PNG16" else ("EXR" if snap["export_format"] == "EXR" else "PNG8")
     rgba = np.zeros((res, res, 4), dtype=np.float32)
-    rgba[..., 0] = weartime_uv; rgba[..., 1] = weartime_uv
-    rgba[..., 2] = weartime_uv; rgba[..., 3] = 1.0
-    weartime_path = os.path.join(cache_dir, "WearTime.png")
-    bridge.run(lambda: _save_uv_texture(weartime_path, rgba, fmt))
-    # AIWear_Mask.png — the directly-reprojected wear mask (the "重投影完的
-    # mask"). Persisted for QA/production (the shader gate is WearTime, but the
+    rgba[..., 0] = wearthreshold_uv; rgba[..., 1] = wearthreshold_uv
+    rgba[..., 2] = wearthreshold_uv; rgba[..., 3] = 1.0
+    wearthreshold_path = os.path.join(cache_dir, "WearThreshold.png")
+    bridge.run(lambda: _save_uv_texture(wearthreshold_path, rgba, fmt))
+    # M_Wear.png — the directly-reprojected wear mask (the "重投影完的
+    # mask"). Persisted for QA/production (the shader gate is WearThreshold, but the
     # user asked where the reprojected mask lives — here it is).
     mask_rgba = np.zeros((res, res, 4), dtype=np.float32)
     mask_rgba[..., 0] = ai_field; mask_rgba[..., 1] = ai_field
     mask_rgba[..., 2] = ai_field; mask_rgba[..., 3] = 1.0
-    mask_path = os.path.join(cache_dir, "AIWear_Mask.png")
-    bridge.run(lambda: _save_uv_texture(mask_path, mask_rgba, fmt))
+    m_wear_path = os.path.join(cache_dir, "M_Wear.png")
+    bridge.run(lambda: _save_uv_texture(m_wear_path, mask_rgba, fmt))
     # AIWear_WornTex.png — encoded LINEAR clean→worn color residual.
     # RGB: bounded encoded residual; A: actual AI wear evidence (not coverage).
     wtex = np.zeros((res, res, 4), dtype=np.float32)
@@ -1248,8 +1279,8 @@ def _run_replay(job, snap, bridge):
     job.message = "Replay: attaching wear overlay shader…"; job.progress = 0.97
 
     def _attach():
-        wt_img = bpy.data.images.load(weartime_path)
-        wt_img.name = "AIWear_WearTime"
+        wt_img = bpy.data.images.load(wearthreshold_path)
+        wt_img.name = "AIWear_WearThreshold"
         wt_img.colorspace_settings.name = "Non-Color"
         worn_img = bpy.data.images.load(worn_tex_path)
         worn_img.name = "AIWear_WornTex"
@@ -1264,15 +1295,16 @@ def _run_replay(job, snap, bridge):
         return mats
     bridge.run(_attach)
 
-    job.meta["weartime_path"] = weartime_path
+    job.meta["wearthreshold_path"] = wearthreshold_path
     job.meta["worn_tex_path"] = worn_tex_path
-    job.meta["worn_mask_path"] = mask_path
+    job.meta["m_wear_path"] = m_wear_path
     job.meta["replayed"] = True
     if snap.get("save_experiment_snapshot", False):
         exp_dir = _save_experiment_bundle(
             cache_dir, snap, job, n_views, ai_field,
-            weartime_before_post, weartime_uv, replayed=True)
+            wearthreshold_before_post, wearthreshold_uv, replayed=True)
         job.meta["experiment_dir"] = exp_dir
+    _save_oblique_preview(obj_name, cache_dir, snap, bridge)
     job.state = JobState.DONE
     job.stage = JobStage.EXPORT
     job.progress = 1.0
@@ -1484,7 +1516,7 @@ def start_replay(context) -> str:
     """Launch a downstream-only replay (no render, no AI). See _run_replay.
 
     Reuses the cached clean_V{i}.png + worn_V{i}.png + views.json from the last
-    full run on the active object. Lets you iterate on surface/WearTime params
+    full run on the active object. Lets you iterate on surface/WearThreshold params
     without spending API budget (Q3).
     """
     snap = snapshot_context(context)

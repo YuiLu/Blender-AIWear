@@ -16,7 +16,7 @@ from .wear_nodegroup import (  # noqa: F401
     on_feather,
     GROUP_NAME,
     PREVIEW_MAT,
-    WEARTIME_NODE,
+    WEARTHRESHOLD_NODE,
     WORNTEX_NODE,
     MASKGROUP_NODE,
     UVMAP_NODE,

@@ -43,13 +43,13 @@ for fn in ("start_replay", "_run_replay", "_uv_coverage_diag", "_uv_empty_error_
         errors.append(f"pipeline.{fn} missing")
 
 # Q4/Q1/Q6 module-level sanity (import the modules; the real behavior was
-# verified by _inspect_cache / _probe_weartime separately)
+# verified by _inspect_cache / _probe_wearthreshold separately)
 from ai_wear.surface import projection, wear_growth
 from ai_wear.render import view_sampler
 from ai_wear.shader import wear_nodegroup
 for m, name in ((projection, "extract_screen_mask"),
                 (projection, "accumulate_rgb_view"),
-                (wear_growth, "build_weartime_from_graph"),
+                (wear_growth, "build_wearthreshold_from_graph"),
                 (view_sampler, "compute_framing"),
                 (wear_nodegroup, "ensure_node_group"),
                 (wear_nodegroup, "attach_wear_overlay")):

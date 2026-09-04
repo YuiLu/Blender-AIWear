@@ -1,9 +1,9 @@
-"""WearTime topology growth.
+"""WearThreshold topology growth.
 
 Deterministic, no AI re-run. The AI field is transferred to vertices, combined
 with convexity + exposure into a propensity; seeds are picked at high-propensity
 local maxima; a multi-source Dijkstra over the vertex graph produces an arrival
-distance that becomes the base WearTime; object-space 3D noise breaks it up
+distance that becomes the base WearThreshold; object-space 3D noise breaks it up
 (continuous across UV seams because it samples 3D position, not UV). The vertex
 field is then baked back to the target UV.
 
@@ -197,12 +197,12 @@ def value_noise_3d(pos: np.ndarray, scale: float, seed: int) -> np.ndarray:
 
 # --- assembly ---------------------------------------------------------------
 
-def build_weartime_from_graph(uvfield, ai_field_uv: np.ndarray, convexity: np.ndarray,
+def build_wearthreshold_from_graph(uvfield, ai_field_uv: np.ndarray, convexity: np.ndarray,
                               exposure: np.ndarray, adj: dict, world: np.ndarray,
                               weights: dict, gamma: float, alpha: float,
                               noise_amp: float, noise_scale: float, use_barrier: bool,
                               mat_penalty: float, seed: int, radius: float) -> dict:
-    """Numpy-only WearTime core (graph + convexity supplied). Runs on worker thread."""
+    """Numpy-only WearThreshold core (graph + convexity supplied). Runs on worker thread."""
     from .geometry_prior import compute_propensity
 
     ai_vertex = transfer_uv_to_vertex(uvfield, ai_field_uv)
@@ -224,10 +224,10 @@ def build_weartime_from_graph(uvfield, ai_field_uv: np.ndarray, convexity: np.nd
     T = np.clip(T, 0.0, 1.0).astype(np.float32)
     T = _smooth_field(T, adj, iterations=2)
 
-    weartime_uv = bake_vertex_to_uv(uvfield, T)
+    wearthreshold_uv = bake_vertex_to_uv(uvfield, T)
     return {
-        "weartime_vertex": T,
-        "weartime_uv": weartime_uv,
+        "wearthreshold_vertex": T,
+        "wearthreshold_uv": wearthreshold_uv,
         "propensity": P,
         "ai_vertex": ai_vertex,
         "seeds": seeds,
@@ -235,14 +235,14 @@ def build_weartime_from_graph(uvfield, ai_field_uv: np.ndarray, convexity: np.nd
     }
 
 
-def build_direct_weartime(uvfield, ai_field_uv: np.ndarray, convexity: np.ndarray,
+def build_direct_wearthreshold(uvfield, ai_field_uv: np.ndarray, convexity: np.ndarray,
                           exposure: np.ndarray, weights: dict,
                           noise_amp: float, noise_scale: float,
                           seed: int, world: np.ndarray) -> dict:
     """Ablation path without Dijkstra/topology propagation.
 
     Propensity is evaluated at vertices and converted directly to arrival time.
-    The return schema matches ``build_weartime_from_graph`` so every downstream
+    The return schema matches ``build_wearthreshold_from_graph`` so every downstream
     bake/shader/export stage remains identical.
     """
     from .geometry_prior import compute_propensity
@@ -252,8 +252,8 @@ def build_direct_weartime(uvfield, ai_field_uv: np.ndarray, convexity: np.ndarra
     noise = value_noise_3d(world, noise_scale, int(seed)) * 2.0 - 1.0
     vertex_time = np.clip(1.0 - propensity + noise_amp * noise, 0.0, 1.0).astype(np.float32)
     return {
-        "weartime_vertex": vertex_time,
-        "weartime_uv": bake_vertex_to_uv(uvfield, vertex_time),
+        "wearthreshold_vertex": vertex_time,
+        "wearthreshold_uv": bake_vertex_to_uv(uvfield, vertex_time),
         "propensity": propensity,
         "ai_vertex": ai_vertex,
         "seeds": [],
@@ -261,13 +261,13 @@ def build_direct_weartime(uvfield, ai_field_uv: np.ndarray, convexity: np.ndarra
     }
 
 
-def build_weartime(obj, uvfield, ai_field_uv: np.ndarray, convexity: np.ndarray,
+def build_wearthreshold(obj, uvfield, ai_field_uv: np.ndarray, convexity: np.ndarray,
                    exposure: np.ndarray, weights: dict, gamma: float, alpha: float,
                    noise_amp: float, noise_scale: float, use_barrier: bool,
                    mat_penalty: float, seed: int, radius: float) -> dict:
-    """Full WearTime build (builds topology graph internally). Returns vertex + UV WearTime."""
+    """Full WearThreshold build (builds topology graph internally). Returns vertex + UV WearThreshold."""
     adj, world = build_topology_graph(obj)
-    return build_weartime_from_graph(
+    return build_wearthreshold_from_graph(
         uvfield, ai_field_uv, convexity, exposure, adj, world,
         weights, gamma, alpha, noise_amp, noise_scale, use_barrier,
         mat_penalty, seed, radius)

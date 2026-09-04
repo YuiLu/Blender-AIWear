@@ -129,8 +129,6 @@ class AIWearSceneSettings(PropertyGroup):
     )
     work_resolution: IntProperty(name="Work Res", default=1024, min=256, max=4096,
                                   description="Internal raster resolution for surface field")
-    texture_size: IntProperty(name="Texture Size", default=2048, min=512, max=8192,
-                               description="Output WearTime/mask texture size")
 
     # --- Capture ----------------------------------------------------------
     camera_preset: EnumProperty(items=CAMERA_PRESET_ITEMS, name="Cameras", default="AUTO_6")
@@ -166,7 +164,7 @@ class AIWearSceneSettings(PropertyGroup):
     lock_seed: BoolProperty(name="Lock Seed", default=True,
                             description="Reuse the same seed across views for determinism")
 
-    # --- WearTime parameters ---------------------------------------------
+    # --- WearThreshold parameters ---------------------------------------------
     # Update callbacks drive the shader preview in real time (no AI re-run).
     def _wa_cb(s, c):
         from . import shader as _sh

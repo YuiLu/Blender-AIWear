@@ -3,7 +3,7 @@
 Pipeline: Mesh Preflight / UV QC → Mode A/B → multi-view clean render →
 AI provider (OpenAI / Gemini / ComfyUI / fully-configurable Custom HTTP) →
 screen-mask extraction → 3D Surface Field multi-view fusion → topology-growth
-WearTime → UV seam fusion + dilation → 16-bit WearTime + real-time shader
+WearThreshold → UV seam fusion + dilation → 16-bit WearThreshold + real-time shader
 preview + export.
 
 The external image-generation API endpoint is configured in
@@ -20,7 +20,7 @@ bl_info = {
     "blender": (3, 6, 0),
     "location": "View3D > Sidebar (N) > AI Wear",
     "description": "AI-driven model wear-texture generation: UV QC, surface field, "
-                   "topology-growth WearTime, seam fusion, multi-API providers",
+                   "topology-growth WearThreshold, seam fusion, multi-API providers",
     "category": "Texture",
     "doc_url": "",
     "tracker_url": "",

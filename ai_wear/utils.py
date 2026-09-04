@@ -55,7 +55,7 @@ def _write_png_rgba(path: str, rgba: np.ndarray, bit_depth: int) -> str:
     foreach_set to disk — save_render / Image.save() write RGB=0, A=1 (a blank
     image) even when the buffer holds correct non-zero data (verified: foreach_set
     + foreach_get round-trips fine in memory; only the disk encode is blank).
-    The shader reads WearTime back as Non-Color (identity), so raw-linear values
+    The shader reads WearThreshold back as Non-Color (identity), so raw-linear values
     are exactly what we want written.
     """
     h, w = rgba.shape[:2]
@@ -92,7 +92,7 @@ def _save_image_blender(path: str, rgba: np.ndarray, fmt: str) -> str:
     PNG goes through _write_png_rgba; this remains for OPEN_EXR which the
     pure-Python encoder does not produce. NOTE: on Blender 5.2 this path
     writes a BLANK image for in-memory-created data (see _write_png_rgba),
-    so it should not be relied on for the WearTime PNG output.
+    so it should not be relied on for the WearThreshold PNG output.
     """
     import bpy
     h, w = rgba.shape[:2]

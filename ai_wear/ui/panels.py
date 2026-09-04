@@ -1,6 +1,6 @@
 """Main UI panels — the AI Wear sidebar (N > AI Wear).
 
-Sections: Run, UV/Preflight, Capture, WearTime, Seam, Export, Presets. Each is a
+Sections: Run, UV/Preflight, Capture, WearThreshold, Seam, Export, Presets. Each is a
 sub-panel so users can collapse what they don't need. Provider/model/endpoint and
 the AI prompt live in Add-on Preferences (Edit > Preferences > Add-ons), not here;
 UV QC + progress milestones print to the System Console.
@@ -35,7 +35,7 @@ class AIWEAR_PT_main(bpy.types.Panel):
             row.operator("ai_wear.cancel", text="", icon="CANCEL")
         # Per-stage testing (Q3): replay only the downstream from the last run's
         # cached clean/worn images + camera matrices — no render, no AI. Lets you
-        # iterate on surface/WearTime params without spending API budget.
+        # iterate on surface/WearThreshold params without spending API budget.
         replay = col.row(align=True)
         replay.enabled = not pipeline.is_running(context)
         replay.operator("ai_wear.replay_downstream", icon="FILE_REFRESH")
@@ -54,7 +54,6 @@ class AIWEAR_PT_uv(bpy.types.Panel):
         layout.prop(s, "uv_mode")
         layout.prop(s, "target_uv_layer")
         layout.prop(s, "work_resolution")
-        layout.prop(s, "texture_size")
         layout.operator("ai_wear.preflight", icon="MOD_UVPROJECT")
         # UV QC report is printed to the System Console only (Window > Toggle
         # System Console) — kept out of the panel to reduce clutter.
@@ -100,11 +99,11 @@ class AIWEAR_PT_prompt(bpy.types.Panel):
         layout.prop(s, "seed")
 
 
-class AIWEAR_PT_weartime(bpy.types.Panel):
+class AIWEAR_PT_wearthreshold(bpy.types.Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "AI Wear"
-    bl_label = "WearTime Parameters"
+    bl_label = "WearThreshold Parameters"
     bl_parent_id = "AIWEAR_PT_main"
     bl_options = {"DEFAULT_CLOSED"}
 
@@ -175,7 +174,7 @@ class AIWEAR_PT_export(bpy.types.Panel):
         layout = self.layout
         s = context.scene.ai_wear
         layout.prop(s, "export_format")
-        layout.operator("ai_wear.export_weartime", icon="IMAGE_DATA")
+        layout.operator("ai_wear.export_wearthreshold", icon="IMAGE_DATA")
         layout.operator("ai_wear.export_mask", icon="MOD_MASK")
         layout.operator("ai_wear.export_batch", icon="RENDERLAYERS")
 
@@ -206,7 +205,7 @@ CLASSES = (
     AIWEAR_PT_uv,
     AIWEAR_PT_capture,
     AIWEAR_PT_prompt,
-    AIWEAR_PT_weartime,
+    AIWEAR_PT_wearthreshold,
     AIWEAR_PT_seam,
     AIWEAR_PT_experiments,
     AIWEAR_PT_export,

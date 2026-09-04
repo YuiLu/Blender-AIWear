@@ -37,6 +37,18 @@ DEFAULT_EXPERIMENT_PRESETS = (
     # Experiment 7: extra prompt with / without
     ("extra_on", {"prompt_extra": "add fine micro-scratches and edge chipping; "
                                   "keep large flat faces mostly clean"}),
+    # Prompt strategy (requirements-doc: material-adaptive + strength follows
+    # the wear param). ``max_state`` is the AI-stage wear lever that enters the
+    # generated prompt directly, so light/heavy/severe scale the description;
+    # ``material``+``wear_type`` swap the per-material strategy. The real-time
+    # ``wear_amount`` slider is post-AI (smoothstep on WearThreshold) and never
+    # calls the model, so it deliberately does not change the prompt.
+    ("prompt_light", {"max_state": "light"}),
+    ("prompt_severe", {"max_state": "severe"}),
+    ("prompt_wood", {"material": "wood",
+                     "wear_type": "scratches, dents and edge wear"}),
+    ("prompt_plastic", {"material": "ABS plastic",
+                        "wear_type": "scuffs, abrasion and stress marks"}),
 )
 
 # Names shipped by 0.3.2/0.3.3 that duplicate the full-feature ``baseline``.

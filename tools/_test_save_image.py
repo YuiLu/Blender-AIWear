@@ -4,7 +4,7 @@ BUG: Blender 5.2's image-save path (save_render / Image.save) does NOT persist
 the in-memory pixel buffer set via foreach_set to disk — it writes RGB=0, A=1
 (a blank image) even when the buffer holds correct non-zero data. foreach_set
 itself works (set+get round-trips fine in memory); only the disk encode is
-blank. This made WearTime.png come out all-black despite a healthy in-memory
+blank. This made WearThreshold.png come out all-black despite a healthy in-memory
 field (mean 0.33) -> shader read T=0 everywhere -> smoothstep -> whole surface
 "fully worn" (Q5/Q7).
 
@@ -48,7 +48,7 @@ def check(tag, path, expect_r, expect_g):
     assert ok, f"{tag}: RGB did not survive save (r={r}, g={g})"
 
 
-# uniform RGB=0.5/0.25, alpha=1, 1024^2 (the WearTime shape)
+# uniform RGB=0.5/0.25, alpha=1, 1024^2 (the WearThreshold shape)
 arr = np.zeros((1024, 1024, 4), dtype=np.float32)
 arr[..., 0] = 0.5; arr[..., 1] = 0.25; arr[..., 3] = 1.0
 p16 = os.path.join(OUT, "regress_png16.png")
@@ -59,7 +59,7 @@ p8 = os.path.join(OUT, "regress_png8.png")
 utils.save_image(p8, arr, "PNG8")
 check("PNG8 uniform", p8, 0.5, 0.25)
 
-# a WearTime-like gradient (R=G=B=val) — must preserve max 1.0
+# a WearThreshold-like gradient (R=G=B=val) — must preserve max 1.0
 val = np.linspace(0, 1, 1024 * 1024).reshape(1024, 1024)
 wt = np.zeros((1024, 1024, 4), dtype=np.float32)
 wt[..., 0] = wt[..., 1] = wt[..., 2] = val

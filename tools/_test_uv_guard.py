@@ -5,9 +5,9 @@ Constructs the actual states that make build_uv_field return 0 valid texels:
   A2: all-degenerate UV triangles (zero area) -> 0 valid
    B: real per-face UVs in [0,1] -> >0 valid (success path)
 
-Plus verifies the catch-all: a WearTime computed from a valid-all-False field is
+Plus verifies the catch-all: a WearThreshold computed from a valid-all-False field is
 all-zero, and bake_vertex_to_uv is the zero source (already shown by
-_probe_weartime; this confirms the guard path end-to-end).
+_probe_wearthreshold; this confirms the guard path end-to-end).
 
 Run: blender -b --python tools/_test_uv_guard.py
 """
@@ -76,7 +76,7 @@ def check(label, mode, expect_zero):
         print(f"  PASS (0 valid): error msg = {msg[:90]}...")
     else:
         assert vc > 0, f"{label}: expected >0 valid, got {vc}"
-        print(f"  PASS (>0 valid): WearTime would be non-black")
+        print(f"  PASS (>0 valid): WearThreshold would be non-black")
 
 
 check("A1", "out_of_tile", expect_zero=True)

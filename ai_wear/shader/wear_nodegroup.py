@@ -2,7 +2,7 @@
 
 A reusable node group 'AIWearMask' computes the wear gate:
     gate = smoothstep(T - feather, T + feather, wear_amount)
-from a WearTime texture (Non-Color, R channel = T). The Wear Amount slider
+from a WearThreshold texture (Non-Color, R channel = T). The Wear Amount slider
 only re-thresholds; no AI / surface field re-run.
 
 attach_wear_overlay() composites the AI clean→worn color residual over
@@ -28,7 +28,7 @@ from bpy.types import NodeTree, ShaderNodeTree
 
 GROUP_NAME = "AIWearMask"
 PREVIEW_MAT = "AIWear_Preview"
-WEARTIME_NODE = "AIWear_WearTime"
+WEARTHRESHOLD_NODE = "AIWear_WearThreshold"
 WORNTEX_NODE = "AIWear_WornTex"
 MASKGROUP_NODE = "AIWear_MaskGroup"
 UVMAP_NODE = "AIWear_UVMap"
@@ -64,7 +64,7 @@ def ensure_node_group() -> ShaderNodeTree:
     # old ng.inputs / ng.outputs collections were removed in 4.0; the default
     # value now lives on the returned interface socket item (NodeTreeInterfaceSocket).
     iface = ng.interface
-    iface.new_socket(name="WearTime", in_out="INPUT", socket_type="NodeSocketColor")
+    iface.new_socket(name="WearThreshold", in_out="INPUT", socket_type="NodeSocketColor")
     s_amt = iface.new_socket(name="Wear Amount", in_out="INPUT", socket_type="NodeSocketFloat")
     s_amt.default_value = 0.6
     s_feather = iface.new_socket(name="Feather", in_out="INPUT", socket_type="NodeSocketFloat")
@@ -95,7 +95,7 @@ def ensure_node_group() -> ShaderNodeTree:
     mr.location = (300, 0)
     out_node.location = (600, 0)
 
-    links.new(in_node.outputs["WearTime"], sep.inputs["Vector"])
+    links.new(in_node.outputs["WearThreshold"], sep.inputs["Vector"])
     links.new(sep.outputs["X"], sub.inputs[0])
     links.new(in_node.outputs["Feather"], sub.inputs[1])
     links.new(sep.outputs["X"], add.inputs[0])
@@ -177,7 +177,7 @@ def _preview_material_for_slot(obj, slot, copies):
     return mat
 
 
-def attach_wear_overlay(obj, weartime_img, worn_img,
+def attach_wear_overlay(obj, wearthreshold_img, worn_img,
                         uv_layer_name: str = "AI_WearUV") -> list[bpy.types.Material]:
     """Composite the AI worn texture over every material slot on ``obj``.
 
@@ -185,11 +185,11 @@ def attach_wear_overlay(obj, weartime_img, worn_img,
                                   existing_base_color + decode(worn_delta),
                                   gate * worn_tex.alpha)  into the existing
     material's Principled BSDF, where gate = the AIWearMask group's smoothstep
-    threshold of WearTime and worn_tex.alpha is reprojected AI wear mask
+    threshold of WearThreshold and worn_tex.alpha is reprojected AI wear mask
     (so camera coverage alone can never activate the appearance). The
     rest of the authored material (roughness, metallic, normals) is preserved.
     Authored materials are copied per object before injection, so shared source
-    materials are never mutated.  The WearTime and worn textures are explicitly
+    materials are never mutated.  The WearThreshold and worn textures are explicitly
     sampled with ``uv_layer_name`` instead of relying on Blender's active UV.
     Returns all object-local materials carrying the overlay.
     """
@@ -207,9 +207,9 @@ def attach_wear_overlay(obj, weartime_img, worn_img,
         mat.use_nodes = True
         bsdf = _find_surface_principled(mat)
         if bsdf is not None:
-            _inject_overlay(mat, bsdf, weartime_img, worn_img, uv_layer_name)
+            _inject_overlay(mat, bsdf, wearthreshold_img, worn_img, uv_layer_name)
         else:
-            _build_standalone_overlay(mat.node_tree, weartime_img, worn_img,
+            _build_standalone_overlay(mat.node_tree, wearthreshold_img, worn_img,
                                       uv_layer_name)
         ptr = mat.as_pointer()
         if ptr not in seen:
@@ -227,15 +227,15 @@ def _set_img(node, image, colorspace):
         pass
 
 
-def _inject_overlay(mat, bsdf, weartime_img, worn_img,
+def _inject_overlay(mat, bsdf, wearthreshold_img, worn_img,
                     uv_layer_name: str) -> None:
     """Insert the overlay nodes between the existing base-color source and the
     BSDF's Base Color input (in place, in the EXISTING material's node tree)."""
     nt = mat.node_tree
     links = nt.links
 
-    wt_node = _find_node(nt, WEARTIME_NODE, "ShaderNodeTexImage")
-    _set_img(wt_node, weartime_img, "Non-Color")
+    wt_node = _find_node(nt, WEARTHRESHOLD_NODE, "ShaderNodeTexImage")
+    _set_img(wt_node, wearthreshold_img, "Non-Color")
     worn_node = _find_node(nt, WORNTEX_NODE, "ShaderNodeTexImage")
     _set_img(worn_node, worn_img, "Non-Color")
     uv_node = _find_node(nt, UVMAP_NODE, "ShaderNodeUVMap")
@@ -263,7 +263,7 @@ def _inject_overlay(mat, bsdf, weartime_img, worn_img,
         rgb.outputs["Color"].default_value = (dv[0], dv[1], dv[2], 1.0)
         base_src_socket = rgb.outputs["Color"]
 
-    # gate * AI mask(alpha): show the residual only where WearTime says worn
+    # gate * AI mask(alpha): show the residual only where WearThreshold says worn
     # AND the clean/worn comparison found a real scratch/chip.
     alpha_mul = _find_node(nt, ALPHA_MUL, "ShaderNodeMath")
     alpha_mul.operation = "MULTIPLY"
@@ -281,7 +281,7 @@ def _inject_overlay(mat, bsdf, weartime_img, worn_img,
     worn_node.extension = "CLIP"
     links.new(uv_node.outputs["UV"], wt_node.inputs["Vector"])
     links.new(uv_node.outputs["UV"], worn_node.inputs["Vector"])
-    links.new(wt_node.outputs["Color"], grp.inputs["WearTime"])
+    links.new(wt_node.outputs["Color"], grp.inputs["WearThreshold"])
     links.new(grp.outputs["Mask"], alpha_mul.inputs[0])
     links.new(worn_node.outputs["Alpha"], alpha_mul.inputs[1])
     links.new(worn_node.outputs["Color"], delta_sub.inputs[1])
@@ -307,15 +307,15 @@ def _inject_overlay(mat, bsdf, weartime_img, worn_img,
         base_src_socket.node.location = (-1400, -400)
 
 
-def _build_standalone_overlay(nt, weartime_img, worn_img,
+def _build_standalone_overlay(nt, wearthreshold_img, worn_img,
                               uv_layer_name: str) -> None:
     """Fallback: build a self-contained mid-gray material plus wear residual."""
     nt.nodes.clear()
     links = nt.links
     out = nt.nodes.new("ShaderNodeOutputMaterial")
     bsdf = nt.nodes.new("ShaderNodeBsdfPrincipled")
-    wt_node = nt.nodes.new("ShaderNodeTexImage"); wt_node.name = WEARTIME_NODE
-    _set_img(wt_node, weartime_img, "Non-Color")
+    wt_node = nt.nodes.new("ShaderNodeTexImage"); wt_node.name = WEARTHRESHOLD_NODE
+    _set_img(wt_node, wearthreshold_img, "Non-Color")
     worn_node = nt.nodes.new("ShaderNodeTexImage"); worn_node.name = WORNTEX_NODE
     _set_img(worn_node, worn_img, "Non-Color")
     uv_node = nt.nodes.new("ShaderNodeUVMap"); uv_node.name = UVMAP_NODE
@@ -339,7 +339,7 @@ def _build_standalone_overlay(nt, weartime_img, worn_img,
     wt_node.extension = "CLIP"; worn_node.extension = "CLIP"
     links.new(uv_node.outputs["UV"], wt_node.inputs["Vector"])
     links.new(uv_node.outputs["UV"], worn_node.inputs["Vector"])
-    links.new(wt_node.outputs["Color"], grp.inputs["WearTime"])
+    links.new(wt_node.outputs["Color"], grp.inputs["WearThreshold"])
     links.new(grp.outputs["Mask"], alpha_mul.inputs[0])
     links.new(worn_node.outputs["Alpha"], alpha_mul.inputs[1])
     links.new(worn_node.outputs["Color"], delta_sub.inputs[1])

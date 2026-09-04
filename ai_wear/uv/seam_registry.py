@@ -70,13 +70,27 @@ def _bilinear_sample(field: np.ndarray, uvs: np.ndarray, res: int) -> np.ndarray
             + c * (1 - fx) * fy + d * fx * fy)
 
 
-def _stamp(field: np.ndarray, x: int, y: int, value: float, radius: int) -> None:
+def _stamp_blend(field: np.ndarray, x: int, y: int, value: float, radius: int) -> None:
+    """Blend `value` into a radius-px disc around (x, y) with a linear falloff.
+
+    The centre takes `value`, the rim keeps the original texel, so a fused seam
+    fades in smoothly instead of stamping a hard ``(2r+1)`` block (which read as
+    a mosaic at low resolution). Writes in place.
+    """
     res = field.shape[0]
     x0 = max(0, x - radius); x1 = min(res, x + radius + 1)
     y0 = max(0, y - radius); y1 = min(res, y + radius + 1)
     if x1 <= x0 or y1 <= y0:
         return
-    field[y0:y1, x0:x1] = value
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    dist = np.sqrt((xx - x) ** 2 + (yy - y) ** 2)
+    w = np.clip(1.0 - dist / max(1.0, float(radius)), 0.0, 1.0)
+    region = field[y0:y1, x0:x1]
+    # Monotonic: only ever RAISE a texel toward `value`. A plain blend can lower
+    # a texel already raised by an earlier stamp (when a later sample's merged
+    # value is smaller), eroding the wear peak we are trying to preserve.
+    blended = region * (1.0 - w) + value * w
+    field[y0:y1, x0:x1] = np.maximum(region, blended)
 
 
 def seam_qa(field: np.ndarray, registry: List[SeamPair], res: int,
@@ -101,24 +115,39 @@ def seam_qa(field: np.ndarray, registry: List[SeamPair], res: int,
 
 
 def fuse_seam(field: np.ndarray, registry: List[SeamPair], res: int,
-              diffuse_texels: int = 8) -> np.ndarray:
-    """Robust-average both sides of each seam and stamp back, removing the seam."""
+              diffuse_texels: int = 8, tol: Optional[float] = None) -> np.ndarray:
+    """Fuse each seam: max-preserve + threshold-gate + distance-falloff blend.
+
+    A UV seam is two copies of the same 3D edge, so the two sides should agree.
+    Taking the *max* (not the mean) keeps the ridge wear peak — a seam is usually
+    a convex edge where wear is highest, and averaging the two sides would halve
+    it. The gate only touches texels where the sides actually disagree
+    (``|va-vb| > tol``), leaving already-continuous seams and clean faces alone;
+    the falloff blend fades the fix in rather than stamping a hard block.
+    """
     out = field.copy()
+    if not registry:
+        return out
     radius = max(1, diffuse_texels // 4)
+    if tol is None:
+        tol = 0.02
+    t = np.linspace(0.05, 0.95, max(8, res // 16))
     for sp in registry:
-        t = np.linspace(0.05, 0.95, max(8, res // 16))
         ua = sp.uv_a0[None] * (1 - t[:, None]) + sp.uv_a1[None] * t[:, None]
         ub = sp.uv_b0[None] * (1 - t[:, None]) + sp.uv_b1[None] * t[:, None]
         va = _bilinear_sample(out, ua, res)
         vb = _bilinear_sample(out, ub, res)
-        merged = 0.5 * (va + vb)  # robust mean; for scalar wear this is fine
+        merged = np.maximum(va, vb)  # keep the peak wear, don't average it away
+        active = np.abs(va - vb) > tol
         for i in range(len(t)):
+            if not active[i]:
+                continue
             xi = int(np.clip(ua[i, 0] * res, 0, res - 1))
             yi = int(np.clip(ua[i, 1] * res, 0, res - 1))
-            _stamp(out, xi, yi, float(merged[i]), radius)
+            _stamp_blend(out, xi, yi, float(merged[i]), radius)
             xi = int(np.clip(ub[i, 0] * res, 0, res - 1))
             yi = int(np.clip(ub[i, 1] * res, 0, res - 1))
-            _stamp(out, xi, yi, float(merged[i]), radius)
+            _stamp_blend(out, xi, yi, float(merged[i]), radius)
     return out
 
 

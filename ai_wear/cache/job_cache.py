@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import time
 import uuid
 from dataclasses import dataclass, field, asdict
@@ -35,7 +36,7 @@ class JobStage(str, Enum):
     AI_POLL = "AI_POLL"
     MASK = "MASK"
     SURFACE = "SURFACE"
-    WEARTIME = "WEARTIME"
+    WEARTHRESHOLD = "WEARTHRESHOLD"
     SEAM = "SEAM"
     EXPORT = "EXPORT"
 
@@ -145,6 +146,40 @@ def object_cache_dir(obj_uuid: str) -> str:
     d = os.path.join(cache_root(), obj_uuid)
     os.makedirs(d, exist_ok=True)
     return d
+
+
+def clear_current_run(obj_uuid: str) -> str:
+    """Clear replaceable artifacts for a new full Generate run.
+
+    ``Replay Downstream`` deliberately depends on the previous run's views and
+    UV snapshot, so it must *not* call this function.  A new full Generate, on
+    the other hand, must not inherit a partial ``views.json`` or old clean/worn
+    pairs after a failed run.  Keep ``experiments/`` as the user's immutable
+    comparison archive and remove every other direct child of this object's
+    cache directory.
+    """
+    cache_dir = object_cache_dir(obj_uuid)
+    cache_abs = os.path.abspath(cache_dir)
+    keep = "experiments"
+    for entry in os.scandir(cache_dir):
+        if entry.name == keep:
+            continue
+        target = os.path.abspath(entry.path)
+        # ``scandir(cache_dir)`` should always satisfy this, but keep the guard
+        # explicit because this is the destructive boundary of the cache API.
+        if os.path.commonpath((cache_abs, target)) != cache_abs:
+            continue
+        # Do not follow a link when deciding whether it is a directory.  The
+        # cache owns these files, but this also prevents an accidental linked
+        # directory from extending deletion outside the cache.
+        is_junction = getattr(os.path, "isjunction", lambda _p: False)(entry.path)
+        if entry.is_symlink() or is_junction:
+            os.unlink(entry.path)
+        elif entry.is_dir(follow_symlinks=False):
+            shutil.rmtree(entry.path)
+        else:
+            os.unlink(entry.path)
+    return cache_dir
 
 
 def stable_hash(*parts: Any) -> str:

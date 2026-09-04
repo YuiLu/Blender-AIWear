@@ -169,7 +169,7 @@ def setup_mode_a(obj, layer_name: Optional[str]) -> Tuple[bool, str]:
     return True, layer.name
 
 
-def setup_mode_b(obj, layer_name: str, texture_size: int,
+def setup_mode_b(obj, layer_name: str, work_resolution: int,
                  angle_deg: float = 66.0,
                  padding_texels: int = 16,
                  depsgraph=None) -> Tuple[bool, str, dict]:
@@ -197,8 +197,8 @@ def setup_mode_b(obj, layer_name: str, texture_size: int,
         real_name = layer.name
         obj.data.uv_layers.active_index = obj.data.uv_layers[:].index(layer)
 
-        island_margin = max(0.002, padding_texels / max(1, texture_size))
-        pack_margin = max(0.001, padding_texels / max(1, texture_size * 2))
+        island_margin = max(0.002, padding_texels / max(1, work_resolution))
+        pack_margin = max(0.001, padding_texels / max(1, work_resolution * 2))
         angle = math.radians(angle_deg)
 
         _run_uv_ops(obj, angle, island_margin, pack_margin, state)

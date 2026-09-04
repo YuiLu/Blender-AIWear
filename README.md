@@ -2,8 +2,8 @@
 
 Blender AI Wear 把图像生成模型给出的磨损语义重新定位到网格表面，输出：
 
-- `AIWear_Mask.png`：AI 在哪些表面区域观察到了磨损；
-- `WearTime.png`：每个表面位置从什么时候开始出现磨损；
+- `M_Wear.png`：AI 在哪些表面区域观察到了磨损；
+- `WearThreshold.png`：每个表面位置从什么时候开始出现磨损；
 - `AIWear_WornTex.png`：AI 生成的局部颜色变化，而不是整张带光照渲染图；
 - 自动接入原材质的 Shader 预览。
 
@@ -18,11 +18,11 @@ Mesh / UV
   ↓
 多视角融合 AI mask + 几何先验
   ↓
-网格拓扑传播得到 WearTime
+网格拓扑传播得到 WearThreshold
   ↓
 UV Seam Fusion + Padding
   ↓
-WearTime / WornTex / Shader
+WearThreshold / WornTex / Shader
 ```
 
 ## 1. 安装与基本使用
@@ -33,7 +33,7 @@ WearTime / WornTex / Shader
 1. 把 `ai_wear/` 放入 Blender 用户 `scripts/addons/`，或者安装本仓库生成的 zip。
 2. 在 `Edit > Preferences > Add-ons > AI Wear Texture` 中配置 Provider。
 3. 选中一个 Mesh，打开 `N > AI Wear`。
-4. 选择 UV Mode、相机、Prompt 和 WearTime 参数。
+4. 选择 UV Mode、相机、Prompt 和 WearThreshold 参数。
 5. 先运行 Preflight，再运行 `Generate Wear Texture`。
 6. 完成后直接拖动 `Wear Amount` / `Feather`；不会重新请求 AI。
 7. 只修改几何先验、拓扑、seam 或生长参数时，用 `Replay Downstream` 复用上次 AI 图。
@@ -187,7 +187,7 @@ F_ai = clamp(sum_mask / sum_weight)
 F_ai ← 0.5 · (F_ai + neighbor_mean)
 ```
 
-最终 `F_ai` 保存为 `AIWear_Mask.png`，也是后续几何先验中 `w_ai` 对应的输入。
+最终 `F_ai` 保存为 `M_Wear.png`，也是后续几何先验中 `w_ai` 对应的输入。
 
 ## 7. 几何先验是什么、怎么计算、有什么作用
 
@@ -250,9 +250,9 @@ P(v) = clamp(
 关闭 `Geometry Prior` 时，后三项被置零，但管线仍正常运行；关闭 `AI Mask` 时只把
 `w_ai` 置零，用于观察纯几何规则能产生什么结果。
 
-## 8. 拓扑传播如何生成 WearTime
+## 8. 拓扑传播如何生成 WearThreshold
 
-`P(v)` 只表示“哪里适合磨损”，还不是可随 Amount 单调展开的先后顺序。WearTime 把它转换为
+`P(v)` 只表示“哪里适合磨损”，还不是可随 Amount 单调展开的先后顺序。WearThreshold 把它转换为
 `T(v)∈[0,1]`：值越小越早出现磨损。
 
 ### 8.1 选择生长种子
@@ -298,7 +298,7 @@ T_base(v) = D(v) / max(D)
 这就是拓扑传播：它只沿真实网格边移动。这里跨 UV seam 连续的直接原因不是“先回到 3D”这句
 话，而是同一个 mesh 顶点只保存一份 `T(v)`；UV seam 只复制 UV 坐标，并没有复制这个顶点值。
 
-关闭 `Topology Growth` 时不会运行 Dijkstra，而是直接使用 `1-P` 作为 WearTime 主体；
+关闭 `Topology Growth` 时不会运行 Dijkstra，而是直接使用 `1-P` 作为 WearThreshold 主体；
 这是可运行的消融分支，不会停在半条管线上。
 
 ### 8.4 最终生长形态
@@ -333,9 +333,9 @@ T_new(v) = 0.5·T(v) + 0.5·mean(T(neighbors))
 注意当前 `gamma` 同时用于投影视角朝向和 Dijkstra 代价指数，这是当前实现的共享“选择性”
 控制：增大后既更排斥掠射投影，也更强迫传播沿高 propensity 区域前进。
 
-## 9. WearTime 如何回到 UV
+## 9. WearThreshold 如何回到 UV
 
-顶点 WearTime 再按 UV 光栅化保存的三角形与重心坐标插值：
+顶点 WearThreshold 再按 UV 光栅化保存的三角形与重心坐标插值：
 
 ```text
 T(u,v) = b0·T(V0) + b1·T(V1) + b2·T(V2)
@@ -356,15 +356,15 @@ mesh 邻接边的两个 UV 副本是否得到一致数值，以及纹理过滤�
 当前管线里要区分三类情况：
 
 1. **数据不一致**：独立 AI 视图可能在同一位置画出不同磨损；两侧面也可能由不同相机覆盖，
-   使用不同的可见性、法线朝向权重或高频图像像素。`AIWear_Mask` 和 `AIWear_WornTex` 是按
+   使用不同的可见性、法线朝向权重或高频图像像素。`M_Wear` 和 `AIWear_WornTex` 是按
    UV texel 直接累计的高分辨率结果，因此仍可能在 seam 两侧不同。
-2. **采样污染**：即使连续的每顶点 WearTime 在边界两侧理论值相同，有限分辨率下两个 UV 岛
+2. **采样污染**：即使连续的每顶点 WearThreshold 在边界两侧理论值相同，有限分辨率下两个 UV 岛
    的 texel 中心并不落在完全相同的 3D 位置；双线性、mipmap 和各向异性过滤还会读到岛外的
    黑色/中性色或相邻岛。这由 padding、岛间距和输出分辨率决定。
 3. **不是可配对的 seam**：重叠/镜像 UV 会让不同表面争用同一 texel；开口边、拆开的顶点或
    不连通几何没有共享拓扑边。它们不能靠当前 Seam Registry 的“两侧配对”自动解决。
 
-因此，当前 WearTime 较不容易产生结构性断裂，是因为它先得到**每顶点唯一数值**再烘焙；
+因此，当前 WearThreshold 较不容易产生结构性断裂，是因为它先得到**每顶点唯一数值**再烘焙；
 不是因为管线中引入了额外的数据抽象。高频 AI mask、颜色残差和真实纹理采样仍需要单独检查。
 
 ### 10.2 Seam Registry
@@ -386,7 +386,7 @@ value(t) = 0.5 · (sample(A,t) + sample(B,t))
 ```
 
 再把相同 `value(t)` 写回两侧。`Seam Diffuse` 决定写回半径，实际 stamp radius 为
-`max(1, diffuse_texels/4)`。WearTime、WornTex RGB 和 mask alpha 都执行配对融合，以降低
+`max(1, diffuse_texels/4)`。WearThreshold、WornTex RGB 和 mask alpha 都执行配对融合，以降低
 mask 已连续但颜色仍跳变的概率。它是针对已测得差异的后处理，不是重投影正确性的来源。
 
 ### 10.4 Padding 不是 Seam Fusion
@@ -413,14 +413,14 @@ seam 的两侧配对，在烘焙后的纹理上做双线性采样，结果如下
 
 | 后处理 | seam mean | seam p95 |
 | --- | ---: | ---: |
-| 都关闭（原始 WearTime） | 0.03518 | 0.07698 |
+| 都关闭（原始 WearThreshold） | 0.03518 | 0.07698 |
 | 仅 Seam Fusion | 0.00631 | 0.02068 |
 | 仅 Padding | 0.00906 | **0.01324** |
 | Seam Fusion + Padding | **0.00607** | 0.01947 |
 
 这组结果不支持“先投回 3D，所以天然无缝”的说法：原始烘焙仍测到了边界差异；只开 Padding
 已经把 p95 从 `0.07698` 降到 `0.01324`，说明本例很大一部分是岛外采样问题。Seam Fusion
-进一步降低了平均差异，但当前按固定半径 stamp 的实现改动范围偏宽：最终 WearTime 中有
+进一步降低了平均差异，但当前按固定半径 stamp 的实现改动范围偏宽：最终 WearThreshold 中有
 `42.1%` texel 的变化超过 `0.01`。在相同 hero render 中，两组图片的全图差异 p95 为 0，
 只有 `2.06%` 像素变化超过 `0.01`，差异主要集中在 seam 附近。
 
@@ -457,7 +457,7 @@ final_base_color = mix(original_base_color, worn_color, mask)
 
 因此：
 
-- `Wear Amount=30/60/100` 是同一张 WearTime 的阈值，天然满足集合单调增长；
+- `Wear Amount=30/60/100` 是同一张 WearThreshold 的阈值，天然满足集合单调增长；
 - 100% 只打开所有有 AI mask 的区域，不会把全部相机覆盖区变白；
 - 原材质的 Normal、Roughness、Metallic 等连接保留；当前 AI 外观叠加只修改 Base Color；
 - 共享材质先复制成对象私有预览材质，不影响使用原材质的其他对象。
@@ -498,16 +498,16 @@ JSON 后只需在节点 1 选择平台已有的 inpainting checkpoint。插件�
 - `Save Experiment Snapshot`：保存本次定性对照材料。
 
 相机数量与 `View Context` 在 Capture 面板设置。实验快照包含最终贴图、seam/padding 前后
-WearTime，以及完整的 clean/worn/diff/context 视图序列：
+WearThreshold，以及完整的 clean/worn/diff/context 视图序列：
 
 ```text
 .ai_wear_cache/<object>/experiments/<label>_<job_id>/
 ├─ config.json
 ├─ metrics.json                 # 只记录 elapsed_seconds
-├─ AIWear_Mask.png
-├─ WearTime_before_seam_padding.png
-├─ WearTime_after_seam_padding.png
-├─ WearTime.png
+├─ M_Wear.png
+├─ WearThreshold_before_seam_padding.png
+├─ WearThreshold_after_seam_padding.png
+├─ WearThreshold.png
 ├─ AIWear_WornTex.png
 └─ views/
    ├─ views.json
@@ -539,7 +539,7 @@ ai_wear/render       自动相机与 clean render
 ai_wear/ai           Provider、ComfyUI graph 执行
 ai_wear/uv           UV QC、UV 光栅化、seam registry
 ai_wear/surface      差分、重投影、融合、几何先验、Dijkstra
-ai_wear/shader       WearTime gate 与原材质叠加
+ai_wear/shader       WearThreshold gate 与原材质叠加
 ai_wear/operators    管线、缓存、Replay、实验快照
 ```
 

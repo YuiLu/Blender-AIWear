@@ -91,7 +91,7 @@ geometry_off    Geometry Prior = off
 baseline        Geometry Prior = on（完整管线共同对照）
 ```
 
-其他开关保持一致。展示相同观察角度下的模型，并附 `AIWear_Mask.png`，说明 AI mask
+其他开关保持一致。展示相同观察角度下的模型，并附 `M_Wear.png`，说明 AI mask
 输入没有变化，变化来自 convexity / exposure / cavity。
 
 定性观察：
@@ -110,7 +110,7 @@ topology_off    Topology Growth = off
 baseline        Topology Growth = on（完整管线共同对照）
 ```
 
-关闭时 WearTime 直接来自 `1-P`；开启时从高 propensity 种子运行 multi-source Dijkstra。
+关闭时 WearThreshold 直接来自 `1-P`；开启时从高 propensity 种子运行 multi-source Dijkstra。
 
 定性观察：
 
@@ -135,7 +135,7 @@ Padding，也不能验证“先重投影到 mesh 再烘焙就天然无缝”这�
 
 展示内容：
 
-1. `WearTime_before_seam_padding.png` 与 `WearTime_after_seam_padding.png`；
+1. `WearThreshold_before_seam_padding.png` 与 `WearThreshold_after_seam_padding.png`；
 2. UV Editor 中圈出 seam 两侧；
 3. 模型上用近距离、斜视角和 Material Preview 展示接缝；
 4. 最终模型使用完全相同的 Amount 和 Feather。
@@ -144,7 +144,7 @@ Padding，也不能验证“先重投影到 mesh 再烘焙就天然无缝”这�
 
 定性观察：
 
-- 同一条 3D 边两侧的 WearTime 是否跳变；
+- 同一条 3D 边两侧的 WearThreshold 是否跳变；
 - WornTex 颜色是否出现一边亮、一边暗；
 - 开启后接缝是否消失，同时有没有把细节扩散得过宽；
 - padding 关闭时 mipmap / 双线性采样是否在岛边漏出黑边或中性色。
@@ -155,7 +155,7 @@ Padding，也不能验证“先重投影到 mesh 再烘焙就天然无缝”这�
 
 ## 实验 6：Wear Amount 单调控制
 
-同一张 WearTime 直接导出 30 / 60 / 100 三张结果，不重新运行 AI：
+同一张 WearThreshold 直接导出 30 / 60 / 100 三张结果，不重新运行 AI：
 
 ```text
 amount_30
@@ -181,6 +181,8 @@ extra_on     Extra Prompt = "add fine micro-scratches and edge chipping; keep la
 
 `Extra Prompt` 被原样追加到自动生成的 prompt 末尾（见 `_make_wear_prompt`），所以这组验证的
 是“文字补充能否把磨损颗粒度、位置约束压得更接近预期”，而不是模型或相机差异。
+
+需求文档还要求“不同材质可能需要不同的提示词策略、提示词强度应随磨损参数变化”，这由 `_make_wear_prompt` 自动满足：`max_wear_state` 直接决定 Prompt 强度（light / heavy / severe），`prompt_material` 与 `prompt_wear_type` 成对替换材质策略。除 `baseline` / `extra_on` 外，`prompt_light` / `prompt_severe`（改强度）与 `prompt_wood` / `prompt_plastic`（改材质）预设可一键载入这些分支，对照时同样只改一项。
 
 展示内容：
 

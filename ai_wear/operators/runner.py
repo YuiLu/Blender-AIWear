@@ -16,8 +16,8 @@ from ..cache.job_cache import JobState
 
 class AIWEAR_OT_run_pipeline(bpy.types.Operator):
     bl_idname = "ai_wear.run_pipeline"
-    bl_label = "Generate Wear Texture"
-    bl_description = "Run the full UV → render → AI → surface field → WearTime pipeline"
+    bl_label = "Generate Wear"
+    bl_description = "Run the full UV → render → AI → surface field → WearThreshold pipeline"
     bl_options = {"REGISTER"}
 
     def execute(self, context):
@@ -40,7 +40,7 @@ class AIWEAR_OT_run_pipeline(bpy.types.Operator):
 class AIWEAR_OT_replay_downstream(bpy.types.Operator):
     bl_idname = "ai_wear.replay_downstream"
     bl_label = "Replay Downstream (no AI)"
-    bl_description = ("Re-run only mask → projection → fusion → WearTime → bake "
+    bl_description = ("Re-run only mask → projection → fusion → WearThreshold → bake "
                       "from the cached clean/worn images of the last full run on "
                       "this object. No render, no AI call — for iterating on the "
                       "surface field without spending API budget")
@@ -104,19 +104,19 @@ class AIWEAR_OT_preflight(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class AIWEAR_OT_export_weartime(bpy.types.Operator, ExportHelper):
-    bl_idname = "ai_wear.export_weartime"
-    bl_label = "Export WearTime"
-    bl_description = "Export the 16-bit WearTime map (Substance/Blender ready)"
+class AIWEAR_OT_export_wearthreshold(bpy.types.Operator, ExportHelper):
+    bl_idname = "ai_wear.export_wearthreshold"
+    bl_label = "Export WearThreshold"
+    bl_description = "Export the 16-bit WearThreshold map (Substance/Blender ready)"
     bl_options = {"REGISTER"}
 
     filename_ext = ".png"
     filter_glob: StringProperty(default="*.png;*.exr", options={"HIDDEN"})
 
     def execute(self, context):
-        src = _current_weartime_path(context)
+        src = _current_wearthreshold_path(context)
         if not src or not os.path.exists(src):
-            self.report({"ERROR"}, "No WearTime texture found. Run the pipeline first.")
+            self.report({"ERROR"}, "No WearThreshold texture found. Run the pipeline first.")
             return {"CANCELLED"}
         fmt = context.scene.ai_wear.export_format
         from .. import utils
@@ -127,7 +127,7 @@ class AIWEAR_OT_export_weartime(bpy.types.Operator, ExportHelper):
         rgba[..., 0] = v; rgba[..., 1] = v; rgba[..., 2] = v; rgba[..., 3] = 1.0
         out_fmt = "PNG16" if fmt == "PNG16" else ("EXR" if fmt == "EXR" else "PNG8")
         utils.save_image(self.filepath, rgba, out_fmt)
-        self.report({"INFO"}, f"Exported WearTime → {self.filepath}")
+        self.report({"INFO"}, f"Exported WearThreshold → {self.filepath}")
         return {"FINISHED"}
 
 
@@ -141,9 +141,9 @@ class AIWEAR_OT_export_mask(bpy.types.Operator, ExportHelper):
     filter_glob: StringProperty(default="*.png", options={"HIDDEN"})
 
     def execute(self, context):
-        src = _current_weartime_path(context)
+        src = _current_wearthreshold_path(context)
         if not src or not os.path.exists(src):
-            self.report({"ERROR"}, "No WearTime texture. Run the pipeline first.")
+            self.report({"ERROR"}, "No WearThreshold texture. Run the pipeline first.")
             return {"CANCELLED"}
         from .. import utils
         import numpy as np
@@ -170,9 +170,9 @@ class AIWEAR_OT_export_batch(bpy.types.Operator, ExportHelper):
     filter_glob: StringProperty(default="*.png", options={"HIDDEN"})
 
     def execute(self, context):
-        src = _current_weartime_path(context)
+        src = _current_wearthreshold_path(context)
         if not src or not os.path.exists(src):
-            self.report({"ERROR"}, "No WearTime texture. Run the pipeline first.")
+            self.report({"ERROR"}, "No WearThreshold texture. Run the pipeline first.")
             return {"CANCELLED"}
         from .. import utils
         import numpy as np
@@ -191,11 +191,11 @@ class AIWEAR_OT_export_batch(bpy.types.Operator, ExportHelper):
         return {"FINISHED"}
 
 
-def _current_weartime_path(context) -> str:
+def _current_wearthreshold_path(context) -> str:
     job = pipeline.get_active_job(context)
-    if job and job.meta.get("weartime_path"):
-        return job.meta["weartime_path"]
-    img = bpy.data.images.get("AIWear_WearTime")
+    if job and job.meta.get("wearthreshold_path"):
+        return job.meta["wearthreshold_path"]
+    img = bpy.data.images.get("AIWear_WearThreshold")
     if img and img.filepath:
         return bpy.path.abspath(img.filepath)
     return ""
@@ -351,7 +351,7 @@ CLASSES = (
     AIWEAR_OT_log,
     AIWEAR_OT_open_log,
     AIWEAR_OT_preflight,
-    AIWEAR_OT_export_weartime,
+    AIWEAR_OT_export_wearthreshold,
     AIWEAR_OT_export_mask,
     AIWEAR_OT_export_batch,
     AIWEAR_OT_preset_save,

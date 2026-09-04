@@ -82,7 +82,7 @@ def prepare_worn_overlay(encoded_rgb: np.ndarray, ai_field: np.ndarray,
 
     Returns ``rgb`` in the same unsigned residual encoding (0.5 is neutral) and
     a continuous ``alpha`` wear-mask envelope.  The shader still multiplies
-    this alpha by the monotonic WearTime gate, so 30 is a subset of 60 of 100,
+    this alpha by the monotonic WearThreshold gate, so 30 is a subset of 60 of 100,
     while even 100 remains confined to AI-observed wear instead of whitening
     every camera-covered texel.
     """

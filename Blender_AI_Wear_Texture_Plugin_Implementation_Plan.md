@@ -2,7 +2,7 @@
 
 技术实现文档 / Implementation Plan
 
-范围：UV 质检与自动展开 · 3D Surface Field · 拓扑生长式 WearTime · UV Seam Fusion · 多 API 接入
+范围：UV 质检与自动展开 · 3D Surface Field · 拓扑生长式 WearThreshold · UV Seam Fusion · 多 API 接入
 
 V0.2 — 面向 MVP 落地（补充多视角一致性与 Demo Mesh）
 
@@ -26,7 +26,7 @@ MVP 默认处理单个活动 Mesh；多对象批处理、xatlas、RizomUV Bridge
 AI：决定磨损分布与视觉语义
 Blender Geometry：决定像素到底属于模型表面的哪里
 3D Surface Field：承载跨视角、跨 UV 岛的一致表面数据
-WearTime：把一次 AI 结果转换成连续 0~100 的可控磨损过程
+WearThreshold：把一次 AI 结果转换成连续 0~100 的可控磨损过程
 UV：最后的存储 / 导出载体，而不是匹配算法本身
 ```
 
@@ -53,13 +53,13 @@ UV：最后的存储 / 导出载体，而不是匹配算法本身
         ↓
 [Multi-view Fusion + Geometry Prior]
         ↓
-[Topology-aware WearTime / Wear Activation Field]
+[Topology-aware WearThreshold / Wear Activation Field]
         ↓
 [Seam Registry + Seam Fusion + Padding]
         ↓
 [Blender Shader: Wear Amount 0~100 实时阈值 / Dissolve]
         ↓
-[WearTime / WearMask 输出；ORM 等派生贴图后续扩展]
+[WearThreshold / WearMask 输出；ORM 等派生贴图后续扩展]
 ```
 
 | 阶段 | 输入 | 输出 | 核心职责 |
@@ -70,9 +70,9 @@ UV：最后的存储 / 导出载体，而不是匹配算法本身
 | AI | Clean View + Prompt | Worn View | 只改表面状态，不负责 UV |
 | Mask | Clean/Worn | 2D Wear Mask | 提取 AI 引入的磨损变化 |
 | Surface Field | Mask + Camera + Mesh | Surface Wear Score | 将多视角信号融合到模型表面 |
-| WearTime | AI Field + Geometry | 0~1 Activation Time | 用拓扑传播构造连续磨损过程 |
+| WearThreshold | AI Field + Geometry | 0~1 Activation Time | 用拓扑传播构造连续磨损过程 |
 | Seam / Bake | Surface Field + UV | 无缝纹理 | 跨 UV 岛约束与 padding |
-| Preview / Export | WearTime | Shader / PNG16 | 0~100 实时预览与导出 |
+| Preview / Export | WearThreshold | Shader / PNG16 | 0~100 实时预览与导出 |
 
 # 3. Feature 与实现思路
 
@@ -121,7 +121,7 @@ SurfaceField
 - position P / normal N（可分块计算，不必常驻全部内存）
 - ai_score        : AI 多视角融合后的磨损概率
 - geom_score      : 凸度 / 可见度等几何先验
-- wear_time       : 0~1，何时开始出现磨损
+- wear_threshold       : 0~1，何时开始出现磨损
 - confidence      : 多视角覆盖与 AI 对齐置信度
 - valid_mask      : 有效表面 texel
 ```
@@ -207,9 +207,9 @@ ProviderCapabilities
 
 验收指标不以“几张 Worn View 看起来像”为准，而以 3D 一致性衡量：同一 Surface Point 在两个可见视角反投影得到的 mask 差值、重叠可见区域的 p95 discrepancy、以及最终 Surface Field 的 coverage/confidence。这样 Provider 更换后仍可用相同指标验证。
 
-## 3.3 WearTime：用拓扑自然生长的 Shader / Dissolve 数据
+## 3.3 WearThreshold：用拓扑自然生长的 Shader / Dissolve 数据
 
-不为 30% / 60% / 100% 分别请求 AI。AI 只给一次磨损分布参考，插件把它转成固定的 WearTime（又称 Wear Activation Map）。每个表面点 T∈[0,1] 表示“磨损强度达到多少时该位置开始被激活”。用户的 Wear Amount 只在 Shader 中对 T 做连续阈值。
+不为 30% / 60% / 100% 分别请求 AI。AI 只给一次磨损分布参考，插件把它转成固定的 WearThreshold（又称 Wear Activation Map）。每个表面点 T∈[0,1] 表示“磨损强度达到多少时该位置开始被激活”。用户的 Wear Amount 只在 Shader 中对 T 做连续阈值。
 
 ```text
 T(P) = 0.15  → 很早就出现（高凸边 / 高频接触）
@@ -228,11 +228,11 @@ s = Wear Amount / 100
 
 1. 在 Mesh Vertex / Edge Graph 上做 multi-source Dijkstra。边的 traversal cost 由 3D 边长、凸凹性、AI propensity、材质边界共同决定，使磨损更容易沿高凸边和相邻表面扩张。
 
-1. 把 geodesic arrival distance 归一化为基础 WearTime，再叠加低频 object-space 3D noise。噪声用 3D Position 采样，不用 UV noise，因此跨 UV seam 连续。
+1. 把 geodesic arrival distance 归一化为基础 WearThreshold，再叠加低频 object-space 3D noise。噪声用 3D Position 采样，不用 UV noise，因此跨 UV seam 连续。
 
-1. 对 WearTime 做少量拓扑 Laplacian / edge-aware smoothing，避免离散顶点产生阶梯；材质边界或用户 Barrier 不跨越。
+1. 对 WearThreshold 做少量拓扑 Laplacian / edge-aware smoothing，避免离散顶点产生阶梯；材质边界或用户 Barrier 不跨越。
 
-1. Bake 到 AI_WearUV，得到 16-bit WearTime。Shader 只根据 Wear Amount + Feather 计算最终 mask。
+1. Bake 到 AI_WearUV，得到 16-bit WearThreshold。Shader 只根据 Wear Amount + Feather 计算最终 mask。
 
 可直接采用如下第一版公式：
 
@@ -277,7 +277,7 @@ Seam Registry 的检测方式：遍历拓扑 edge 的两侧 face loops；如果�
 | Diffuse | 从 seam 向岛内若干 texel 衰减融合 | 避免只有一条像素被硬改 |
 | Padding | 岛外 dilation | 解决双线性采样 / mipmap bleed |
 
-WearTime 低频部分在 mesh topology 上生成，本身已经跨 seam 连续；Seam Fusion 主要修复 AI_Field 的高频投影差异和 raster / sampling 误差。对 scalar mask / WearTime 可以融合；未来如果输出 tangent normal，不应直接跨 seam 平均 RGB，而应从连续 height / object-space detail 重新 bake。
+WearThreshold 低频部分在 mesh topology 上生成，本身已经跨 seam 连续；Seam Fusion 主要修复 AI_Field 的高频投影差异和 raster / sampling 误差。对 scalar mask / WearThreshold 可以融合；未来如果输出 tangent normal，不应直接跨 seam 平均 RGB，而应从连续 height / object-space detail 重新 bake。
 
 ## 3.5 多 API 平台的 Blender 接入
 
@@ -316,12 +316,12 @@ ComfyUI 不做节点写死：保存 workflow JSON + Input Mapping + Output Mappi
 
 ## 3.6 Blender Shader 与输出
 
-核心输出不是多套 AI 贴图，而是一张稳定的 WearTime。最终即时预览使用一个固定 Node Group：读取 WearTime（Non-Color）→ 与 Wear Amount 比较 → Smoothstep / ColorRamp Feather → 得到 WearMask。
+核心输出不是多套 AI 贴图，而是一张稳定的 WearThreshold。最终即时预览使用一个固定 Node Group：读取 WearThreshold（Non-Color）→ 与 Wear Amount 比较 → Smoothstep / ColorRamp Feather → 得到 WearMask。
 
 ```text
-WearTime (0..1, PNG16 / EXR)
+WearThreshold (0..1, PNG16 / EXR)
         ↓
-WearAmount (0..1) - WearTime
+WearAmount (0..1) - WearThreshold
         ↓
 Smoothstep(-Feather, +Feather)
         ↓
@@ -330,7 +330,7 @@ WearMask
 Existing Material / Exposed Material / Scratch Detail
 ```
 
-MVP 导出：WearTime 16-bit + 当前 WearMask。ORM、Height、材质层合成接口保留，但不在本阶段做完整 AI PBR。若需要 Substance，只需把 WearTime / WearMask 作为 generator 或 layer mask 输入。
+MVP 导出：WearThreshold 16-bit + 当前 WearMask。ORM、Height、材质层合成接口保留，但不在本阶段做完整 AI PBR。若需要 Substance，只需把 WearThreshold / WearMask 作为 generator 或 layer mask 输入。
 
 # 4. 代码结构与关键接口
 
@@ -344,7 +344,7 @@ ai_wear/
 │  ├─ generate_views.py
 │  ├─ generate_ai.py
 │  ├─ build_surface.py
-│  ├─ build_weartime.py
+│  ├─ build_wearthreshold.py
 │  ├─ seam_fix.py
 │  └─ export.py
 ├─ uv/
@@ -426,8 +426,8 @@ ai_wear/
 | M4-05 | P0 | Topology Graph | vertex/edge adjacency + material boundary penalty | 可用于 multi-source shortest path |
 | M4-06 | P0 | Wear Growth | Multi-source Dijkstra 生成 arrival distance | 磨损从 seed 连续向邻接区域扩张 |
 | M4-07 | P0 | 3D Noise Breakup | object-space correlated noise 扰动 T | 跨 UV seam 不跳变 |
-| M4-08 | P0 | WearTime Bake | mesh field → AI_WearUV 16-bit | 0~1 连续、无明显量化 banding |
-| M4-09 | P0 | Wear Shader | WearTime + Amount + Feather → mask | 0~100 实时预览，无 AI 重算 |
+| M4-08 | P0 | WearThreshold Bake | mesh field → AI_WearUV 16-bit | 0~1 连续、无明显量化 banding |
+| M4-09 | P0 | Wear Shader | WearThreshold + Amount + Feather → mask | 0~100 实时预览，无 AI 重算 |
 | M4-10 | P0 | Monotonic Test | 比较 30/60/100 mask 包含关系 | 30⊆60⊆100 在容差内成立 |
 | M4-11 | P1 | Barrier / Artist Override | 材质边界、手绘保护区影响 traversal | 指定区域不跨越或延迟磨损 |
 | M5-01 | P0 | Seam Registry | 拓扑 edge 两侧 UV discontinuity 检测 | 生成 SeamPair 列表 |
@@ -437,7 +437,7 @@ ai_wear/
 | M5-05 | P0 | Dilation | 岛外 padding | mipmap / bilinear 不露黑边 |
 | M5-06 | P1 | Viewport QA | 选择 / 高亮高误差 seam | 可一键定位问题边 |
 | M5-07 | P1 | Before/After Report | 输出 seam 指标和对比图 | 满足演示与验收材料 |
-| M6-01 | P0 | Export WearTime | PNG16 / EXR，Non-Color | Substance / Blender 可正确读取 |
+| M6-01 | P0 | Export WearThreshold | PNG16 / EXR，Non-Color | Substance / Blender 可正确读取 |
 | M6-02 | P0 | Export Current Mask | 按当前 Amount 固化 8/16-bit Mask | 30/60/100 可批量导出 |
 | M6-03 | P0 | Error Handling | API/网络/UV/磁盘/渲染失败分类 | 错误信息可操作、可重试 |
 | M6-04 | P0 | Case 1 | 喷漆金属硬表面 | 展示边缘磨损、Mode A/B、seam 修复 |
@@ -447,7 +447,7 @@ ai_wear/
 | M6-08 | P0 | README | 安装、API 配置、Workflow mapping、常见错误 | 新用户可独立跑通 |
 | M6-09 | P1 | Preset | Wear 参数 / Prompt / Provider preset 保存加载 | 可复现同一风格 |
 | M6-10 | P2 | xatlas Backend | 独立 UV backend | 无需改 Surface Field |
-| M6-11 | P2 | PBR Derivation | Mask/Height/ORM 派生 | 不改变核心 Surface/WearTime 数据模型 |
+| M6-11 | P2 | PBR Derivation | Mask/Height/ORM 派生 | 不改变核心 Surface/WearThreshold 数据模型 |
 
 # 6. 推荐开发里程碑与验收
 
@@ -455,7 +455,7 @@ ai_wear/
 | --- | --- | --- |
 | Milestone 1 — UV 闭环 | M0 + M1 | 拿 3 个模型跑 Mode A/B；输出 UV QC 报告与 AI_WearUV |
 | Milestone 2 — 2D→Surface | M2 + M3 | 先用人工 synthetic mask，不依赖 AI，验证投影准确性 |
-| Milestone 3 — WearTime | M4 | 同一 Surface Field 下 0~100 实时变化；30⊆60⊆100 |
+| Milestone 3 — WearThreshold | M4 | 同一 Surface Field 下 0~100 实时变化；30⊆60⊆100 |
 | Milestone 4 — Seam | M5 | 统计 seam p95 差值前后；输出高风险边可视化 |
 | Milestone 5 — AI Providers | OpenAI/Gemini/ComfyUI 至少两条链路稳定 | 同一 Clean View 可切 Provider，不改后续算法 |
 | Milestone 6 — 交付 | M6 P0 | 3 个真实案例、性能记录、README、错误处理 |
@@ -468,7 +468,7 @@ ai_wear/
 
 - Surface Field：遮挡不会把正面 mask 投到背面；多视角同一位置结果可融合。
 
-- WearTime：只生成一次 AI 磨损参考；Wear Amount 0~100 通过 Shader 连续控制，且结果单调增长。
+- WearThreshold：只生成一次 AI 磨损参考；Wear Amount 0~100 通过 Shader 连续控制，且结果单调增长。
 
 - Topology Growth：磨损优先从 AI 高概率区域 / 凸边 seed 向 3D 邻接面扩张，而不是在 UV 图里做 2D dilation。
 
@@ -476,9 +476,9 @@ ai_wear/
 
 - API：至少两种 provider + ComfyUI custom workflow；Key 不写入 .blend；网络请求不冻结 Blender。
 
-- 输出：WearTime 16-bit + 当前 WearMask；可以直接进入 Blender / Substance 的现有材质流程。
+- 输出：WearThreshold 16-bit + 当前 WearMask；可以直接进入 Blender / Substance 的现有材质流程。
 
-> **最关键的实现顺序** 先把 UV Rasterizer + Synthetic Mask → Surface Field 做准，再接 AI；先把 WearTime / Topology Growth 做成确定性算法，再做视觉调参。这样即使 API 或模型效果波动，也不会影响核心 3D 管线的可验证性。
+> **最关键的实现顺序** 先把 UV Rasterizer + Synthetic Mask → Surface Field 做准，再接 AI；先把 WearThreshold / Topology Growth 做成确定性算法，再做视觉调参。这样即使 API 或模型效果波动，也不会影响核心 3D 管线的可验证性。
 
 # 附：需求基线
 
@@ -498,7 +498,7 @@ ai_wear/
 | B | [Wheelchair 01](https://polyhaven.com/a/wheelchair_01) | 40K tris；金属管、塑料、软垫、轮子与细杆 | 压力测试 Camera 自动覆盖、细长结构、曲面投影和 visibility；比简单箱体更容易暴露 Surface Field bug | Poly Haven，CC0 |
 | B | [Industrial Coffee Table](https://polyhaven.com/a/industrial_coffee_table) | 41K tris；钢 + 木 | 适合做“同一资产不同材质不同磨损规律”的对照案例，且整体结构不至于太复杂 | Poly Haven，CC0 |
 
-推荐实际 Demo 组合不是全用最复杂模型，而是分层：`Metal Jerrycan` 做主流程与 30/60/100 WearTime 展示，`Camera 01` 或 `Power Box 01` 做 seam / 多材质 / 遮挡案例，`Modular Pipes Plastic 01` 做非金属材质规则案例，最后再用 `Wheelchair 01` 做 stress test。
+推荐实际 Demo 组合不是全用最复杂模型，而是分层：`Metal Jerrycan` 做主流程与 30/60/100 WearThreshold 展示，`Camera 01` 或 `Power Box 01` 做 seam / 多材质 / 遮挡案例，`Modular Pipes Plastic 01` 做非金属材质规则案例，最后再用 `Wheelchair 01` 做 stress test。
 
 如果希望直接从 Blender 内搜资产，也可以用 Blendkit（原 BlenderKit）的免费库，例如 **Industrial green metal box**、**Industrial red/blue metal chest**、**Cantilever Toolbox Rigged and Animated** 等，当前工具分类页明确列有 Free 资产。它们的优势是直接通过 Blender 插件拖入场景；但作为正式 Demo 基准，我仍优先 Poly Haven，因为每个资产页面的三角面数、贴图规格和 CC0 授权信息更清晰，方便写验收报告。
 

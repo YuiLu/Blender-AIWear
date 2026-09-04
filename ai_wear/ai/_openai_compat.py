@@ -10,11 +10,55 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
+import time
 from typing import Optional, Tuple
 
 from . import http_util
 from .base import GenRequest, GenResult, ProviderError
 from .. import utils
+
+
+MAX_RATE_LIMIT_RETRIES = 4
+DEFAULT_RETRY_AFTER_SECONDS = 10.0
+
+
+def _retry_after_seconds(error: Exception) -> float:
+    """Read Azure's human-readable retry delay, with a safe default."""
+    match = re.search(r"retry\s+after\s+(\d+(?:\.\d+)?)\s*seconds?",
+                      str(error), flags=re.IGNORECASE)
+    if match:
+        return max(0.5, min(float(match.group(1)), 120.0))
+    return DEFAULT_RETRY_AFTER_SECONDS
+
+
+def _wait_for_retry(req: GenRequest, seconds: float, attempt: int) -> None:
+    req.on_progress(0.3,
+                    f"Rate limited; retrying in {seconds:g}s "
+                    f"({attempt}/{MAX_RATE_LIMIT_RETRIES})…")
+    deadline = time.monotonic() + seconds
+    # Short sleeps keep Cancel responsive while a worker waits for Azure.
+    while True:
+        if req.should_cancel():
+            raise ProviderError("Cancelled", kind="CANCEL")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(0.25, remaining))
+
+
+def _post_edit_with_retry(url, fields, files, headers, timeout, req):
+    """Submit a multipart edit, retrying only the explicitly transient 429."""
+    for attempt in range(MAX_RATE_LIMIT_RETRIES + 1):
+        if req.should_cancel():
+            raise ProviderError("Cancelled", kind="CANCEL")
+        try:
+            return http_util.post_multipart(url, fields, files, headers, timeout)
+        except http_util.NetworkError as e:
+            if getattr(e, "status", 0) != 429 or attempt >= MAX_RATE_LIMIT_RETRIES:
+                raise
+            _wait_for_retry(req, _retry_after_seconds(e), attempt + 1)
+    raise AssertionError("unreachable")
 
 
 def _parse_extra_headers(prefs) -> dict:
@@ -90,7 +134,7 @@ def generate_openai_compat(req: GenRequest, prefs, base_url: str, path: str,
 
     req.on_progress(0.3, "Uploading clean view…")
     try:
-        code, body = http_util.post_multipart(url, fields, files, headers, prefs.timeout)
+        code, body = _post_edit_with_retry(url, fields, files, headers, prefs.timeout, req)
     except http_util.NetworkError as e:
         # Strict OpenAI-compat endpoints (e.g. gpt-image-*) reject the non-standard
         # 'seed' param with 400 unknown_parameter. http_util raises on 4xx, so we
@@ -101,7 +145,7 @@ def generate_openai_compat(req: GenRequest, prefs, base_url: str, path: str,
         if send_seed and getattr(e, "status", 0) == 400 and "unknown_parameter" in str(e) and "seed" in str(e):
             fields.pop("seed", None)
             req.on_progress(0.3, "Endpoint rejected 'seed'; retrying without…")
-            code, body = http_util.post_multipart(url, fields, files, headers, prefs.timeout)
+            code, body = _post_edit_with_retry(url, fields, files, headers, prefs.timeout, req)
         else:
             raise
     if code != 200:
