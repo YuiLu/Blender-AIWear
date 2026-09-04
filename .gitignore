@@ -4,6 +4,7 @@ __pycache__/
 *.blend1
 *.zip
 .ai_wear_cache/
+/blender/
 .DS_Store
 Thumbs.db
 
