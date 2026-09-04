@@ -576,8 +576,7 @@ def _step_preflight(snap, job, bridge):
             if not uvr.get("ok"):
                 raise RuntimeError(
                     "Mode B could not create a production-quality wear UV: "
-                    f"utilization={uvr.get('utilization', 0):.1%}, "
-                    f"overlap={uvr.get('overlap_ratio', 0):.2%}. "
+                    f"{qc.failure_summary(uvr)}. "
                     "Use a valid authored UV in Mode A or adjust the mesh unwrap.")
         # Compute UV QC once, store for the panel AND print to the console.
         qr = qc.compute_uv_qc(obj, layer, low_res=256)
@@ -1152,8 +1151,7 @@ def _run_replay(job, snap, bridge):
                 if not ok or not repaired_report.get("ok", False):
                     raise RuntimeError(
                         "Replay could not repair the cached Mode-B UV: "
-                        f"utilization={repaired_report.get('utilization', 0):.1%}, "
-                        f"overlap={repaired_report.get('overlap_ratio', 0):.2%}.")
+                        f"{uvqc.failure_summary(repaired_report)}.")
                 layer_name_local = repaired_layer
                 restore["mode_b_repaired"] = True
                 restore["repair_strategy"] = repaired_report.get("mode_b_strategy")

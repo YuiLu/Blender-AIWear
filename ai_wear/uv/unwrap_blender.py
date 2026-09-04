@@ -73,6 +73,7 @@ class _State:
         self.area = None
         self.saved_area_type = None
         self.saved_mesh_select_mode = None
+        self.mesh_flags = None
 
     def save_uv(self, obj):
         import bpy
@@ -84,12 +85,48 @@ class _State:
             self.saved_mesh_select_mode = tuple(bpy.context.tool_settings.mesh_select_mode)
         except Exception:
             self.saved_mesh_select_mode = None
+        # Hidden edit-mode elements are still renderable geometry. Smart UV's
+        # select-all deliberately skips them, which left half of dining_chair
+        # collapsed at (0,0). Temporarily reveal them during unwrap, but retain
+        # every hide/selection bit so the artist's edit state is unchanged.
+        if obj and obj.type == "MESH":
+            mesh = obj.data
+            self.mesh_flags = {
+                "vert_hide": [item.hide for item in mesh.vertices],
+                "vert_select": [item.select for item in mesh.vertices],
+                "edge_hide": [item.hide for item in mesh.edges],
+                "edge_select": [item.select for item in mesh.edges],
+                "face_hide": [item.hide for item in mesh.polygons],
+                "face_select": [item.select for item in mesh.polygons],
+            }
 
     def restore(self):
         import bpy
-        if self.obj and self.obj.mode != self.mode:
+        target_mode = self.mode
+        if self.obj and self.obj.mode != "OBJECT":
             try:
-                bpy.ops.object.mode_set(mode=self.mode)
+                bpy.ops.object.mode_set(mode="OBJECT")
+            except Exception:
+                pass
+        if self.obj and self.obj.type == "MESH" and self.mesh_flags:
+            mesh = self.obj.data
+            groups = (
+                (mesh.vertices, "vert_hide", "hide"),
+                (mesh.vertices, "vert_select", "select"),
+                (mesh.edges, "edge_hide", "hide"),
+                (mesh.edges, "edge_select", "select"),
+                (mesh.polygons, "face_hide", "hide"),
+                (mesh.polygons, "face_select", "select"),
+            )
+            for elements, key, attribute in groups:
+                values = self.mesh_flags[key]
+                if len(elements) == len(values):
+                    for element, value in zip(elements, values):
+                        setattr(element, attribute, value)
+            mesh.update()
+        if self.obj and target_mode != "OBJECT" and self.obj.mode != target_mode:
+            try:
+                bpy.ops.object.mode_set(mode=target_mode)
             except Exception:
                 pass
         if self.obj and self.obj.type == "MESH" and self.active_layer_index is not None:
@@ -145,6 +182,10 @@ def _run_uv_ops(obj, angle_rad: float, island_margin: float,
                 pack_margin: float, state: _State) -> None:
     import bpy
     bpy.ops.object.mode_set(mode="EDIT")
+    # Edit-mode hidden faces are omitted by select_all and would retain the
+    # newly-created layer's default (0,0) UV. Reveal them only for this unwrap;
+    # _State.restore reinstates the exact original hide/selection flags.
+    bpy.ops.mesh.reveal(select=False)
     # Face select mode + select all faces so UV operators act on the whole mesh.
     bpy.context.tool_settings.mesh_select_mode = (False, False, True)
     bpy.ops.mesh.select_all(action="SELECT")

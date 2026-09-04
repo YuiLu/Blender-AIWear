@@ -21,6 +21,51 @@ from .rasterizer import build_uv_field, _find_uv_layer
 # only a few pixels wide and the material looked blocky and blurred.
 MIN_UTILIZATION = 0.10
 MAX_OVERLAP_RATIO = 0.02
+# Real production meshes occasionally contain a handful of collapsed sliver
+# triangles (the dining-chair asset has 16 / 22,013).  The rasterizer already
+# skips them safely, so rejecting the entire atlas is counterproductive.  Keep
+# a strict ratio gate so materially broken unwraps still fail loudly.
+MAX_DEGENERATE_RATIO = 0.001
+
+
+def quality_issues(report: dict) -> list[str]:
+    """Return fatal UV-QC reasons; presentation code should show all of them."""
+    issues = []
+    if not report.get("has_uv", False):
+        issues.append("missing UV layer")
+        return issues
+    if report.get("zero_area_ratio", 0.0) > MAX_DEGENERATE_RATIO:
+        issues.append(
+            f"degenerate UV triangles={report.get('zero_area_count', 0)}/"
+            f"{report.get('ntri', 0)} ({report.get('zero_area_ratio', 0.0):.3%})")
+    if report.get("overlap_ratio", 0.0) >= MAX_OVERLAP_RATIO:
+        issues.append(f"overlap={report.get('overlap_ratio', 0.0):.2%}")
+    if report.get("out_of_01", False):
+        issues.append("UV coordinates outside 0..1")
+    if report.get("utilization", 0.0) < MIN_UTILIZATION:
+        issues.append(f"utilization={report.get('utilization', 0.0):.1%}")
+    return issues
+
+
+def quality_warnings(report: dict) -> list[str]:
+    """Return non-fatal conditions worth exposing to the artist."""
+    warnings = []
+    count = int(report.get("zero_area_count", 0))
+    if count and report.get("zero_area_ratio", 0.0) <= MAX_DEGENERATE_RATIO:
+        warnings.append(
+            f"skipping {count} minor degenerate UV triangles "
+            f"({report.get('zero_area_ratio', 0.0):.3%})")
+    if report.get("flipped_count", 0):
+        warnings.append(
+            f"{report.get('flipped_count')} mirrored/flipped UV triangles")
+    if report.get("modifier_risk") == "topology_change":
+        warnings.append("evaluated modifiers change mesh topology")
+    return warnings
+
+
+def failure_summary(report: dict) -> str:
+    issues = quality_issues(report)
+    return "; ".join(issues) if issues else "no fatal UV-QC issue"
 
 
 def has_uv(mesh, layer_name: Optional[str] = None) -> bool:
@@ -77,6 +122,9 @@ def compute_uv_qc(obj, layer_name: Optional[str], depsgraph=None,
             "has_uv": stats.get("has_uv", False),
             "ntri": stats.get("ntri", 0),
             "zero_area_count": stats.get("zero_area_count", 0),
+            "zero_area_ratio": (
+                float(stats.get("zero_area_count", 0))
+                / max(1, int(stats.get("ntri", 0)))),
             "flipped_count": stats.get("flipped_count", 0),
             "flipped_ratio": stats.get("flipped_ratio", 0.0),
             "bbox": stats.get("bbox", None),
@@ -95,14 +143,9 @@ def compute_uv_qc(obj, layer_name: Optional[str], depsgraph=None,
                 report["overlap_ratio"] = field.overlap_ratio
                 report["degenerate_count"] = field.degenerate_count
                 report["utilization"] = float(valid.sum()) / float(low_res * low_res)
-        # OK gate for baking: has UV, no degenerate, low overlap, in 0..1
-        report["ok"] = bool(
-            report["has_uv"]
-            and report["zero_area_count"] == 0
-            and report["overlap_ratio"] < MAX_OVERLAP_RATIO
-            and not report["out_of_01"]
-            and report["utilization"] >= MIN_UTILIZATION
-        )
+        report["issues"] = quality_issues(report)
+        report["warnings"] = quality_warnings(report)
+        report["ok"] = not report["issues"]
         return report
     finally:
         eval_obj.to_mesh_clear()
@@ -132,7 +175,8 @@ def format_report(report: dict) -> str:
         f"UV QC — {report.get('object')}",
         f"  Layer:        {report.get('uv_layer')}",
         f"  Triangles:    {report.get('ntri')}",
-        f"  Zero-area:    {report.get('zero_area_count')}",
+        f"  Zero-area:    {report.get('zero_area_count')} "
+        f"({report.get('zero_area_ratio', 0.0)*100:.3f}%)",
         f"  Degenerate:   {report.get('degenerate_count', 0)}",
         f"  Flipped:      {report.get('flipped_count')} ({report.get('flipped_ratio')*100:.1f}%)",
         f"  Overlap:      {report.get('overlap_ratio')*100:.2f}%",
@@ -142,4 +186,8 @@ def format_report(report: dict) -> str:
         f"  Modifier risk:{report.get('modifier_risk')}",
         f"  BAKE-READY:   {report.get('ok')}",
     ]
+    if report.get("issues"):
+        lines.append("  Blocking:     " + "; ".join(report["issues"]))
+    if report.get("warnings"):
+        lines.append("  Warnings:     " + "; ".join(report["warnings"]))
     return "\n".join(lines)

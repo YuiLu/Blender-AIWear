@@ -194,7 +194,7 @@ def _set_engine(scene) -> None:
     # leave whatever the scene already uses
 
 
-def configure(scene, resolution: int, state: _RenderState,
+def configure(scene, resolution, state: _RenderState,
               lighting: str = "neutral", unlit_object=None) -> None:
     """Set engine/resolution/format and (optionally) swap in temp lighting.
 
@@ -211,8 +211,12 @@ def configure(scene, resolution: int, state: _RenderState,
     import bpy
     r = scene.render
     _set_engine(scene)
-    r.resolution_x = resolution
-    r.resolution_y = resolution
+    if isinstance(resolution, (tuple, list)):
+        r.resolution_x = int(resolution[0])
+        r.resolution_y = int(resolution[1])
+    else:
+        r.resolution_x = resolution
+        r.resolution_y = resolution
     r.resolution_percentage = 100
     r.film_transparent = False
     r.image_settings.file_format = "PNG"
@@ -252,7 +256,7 @@ def configure(scene, resolution: int, state: _RenderState,
     state._temp_lights.append(light_obj)
 
 
-def render_clean(scene, camera, out_png_path: str, resolution: int = 1024,
+def render_clean(scene, camera, out_png_path: str, resolution=1024,
                  job=None, lighting: str = "neutral", unlit_object=None) -> str:
     """Render the clean view for `camera` to a PNG. Restores scene afterwards."""
     import bpy

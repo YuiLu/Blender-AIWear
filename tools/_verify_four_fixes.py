@@ -25,6 +25,7 @@ ai_wear.register()
 
 from ai_wear.render import passes, oblique
 from ai_wear.uv.seam_registry import SeamPair, fuse_seam, seam_qa
+from ai_wear.uv import qc
 
 fails = []
 
@@ -40,6 +41,18 @@ s = bpy.context.scene.ai_wear
 check("texture_size property removed", not hasattr(s, "texture_size"))
 check("work_resolution still present", hasattr(s, "work_resolution"))
 check("safe padding default", s.padding_texels == 2, s.padding_texels)
+minor_report = {
+    "has_uv": True, "ntri": 22013, "zero_area_count": 16,
+    "zero_area_ratio": 16 / 22013, "overlap_ratio": 0.0,
+    "out_of_01": False, "utilization": 0.523,
+}
+broken_report = dict(minor_report, ntri=100, zero_area_count=16,
+                     zero_area_ratio=0.16)
+check("minor degenerate UV triangles only warn",
+      not qc.quality_issues(minor_report)
+      and bool(qc.quality_warnings(minor_report)))
+check("materially degenerate UV still blocks",
+      bool(qc.quality_issues(broken_report)))
 check("render_clean accepts lighting kwarg",
       "lighting" in passes.render_clean.__code__.co_varnames)
 check("fuse_seam accepts tol kwarg", "tol" in fuse_seam.__code__.co_varnames)
@@ -109,6 +122,13 @@ if blend.is_file():
     check("unlit/neutral/scene differ",
           any(abs(a[0] - b[0]) > 1e-3 for a, b in ((u, n), (n, sc), (u, sc))),
           f"means unlit={u[0]:.4f} neutral={n[0]:.4f} scene={sc[0]:.4f}")
+    rect_path = str(out_dir / "rectangular.png")
+    passes.render_clean(bpy.context.scene, cam, rect_path, (160, 80),
+                        lighting="neutral")
+    rect_image = bpy.data.images.load(rect_path)
+    check("rectangular diagnostic render", tuple(rect_image.size) == (160, 80),
+          tuple(rect_image.size))
+    bpy.data.images.remove(rect_image)
     # A scene-lit comparison must still be legible when a future asset has no
     # World. render_clean restores the original None after the temporary
     # fallback World/Sun pass.

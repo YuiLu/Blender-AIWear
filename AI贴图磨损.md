@@ -53,6 +53,8 @@ flowchart TD
 + Auto 8：使用八个对称斜向视角
 + Counted Auto：Fibonacci sphere 生成指定数量的采样点
 
+几何本身旋转对称并不会让多视角方法失效，但会削弱视角之间的方位身份：当几个角度的轮廓近乎可互换时，独立生成更容易把同一组划痕旋转或重新布局。此时增加独立视角数量未必改善一致性，应优先保证 First-view Anchor 确实被 Provider 接收；带靠背、扶手等方向锚点的模型更适合检验多视角条件是否有效
+
 <img src="https://cdn.nlark.com/yuque/0/2026/png/23115229/1788493981439-598f6439-8564-4eac-8c08-a17463ca42f2.png" width="279" title="" crop="0,0,1,1" id="qmSoS" class="ne-image">
 
 ## 磨损Mask计算
@@ -74,11 +76,11 @@ M_i    = clamp(max(d_luma, d_rgb) / max(P95(d > 0.02), 0.05))
 
 **Mode A：**直接选取已有 UV 作为 Target Wear UV。该模式适合 UV 已经通过生产检查的资产，如果UV本身存在重叠或镜像，该模式并不会让不同表面共享同一份磨损
 
-**Mode B：**保留原 UV，另外建立（或复用）`AI_WearUV` 层并自动展开，让磨损贴图拥有独立且唯一的坐标。展开使用 Blender 的 Smart UV Project（默认 `angle_limit=66°`），再用 Pack Islands 收紧排布
+**Mode B：**保留原 UV，另外建立（或复用）`AI_WearUV` 层并自动展开，让磨损贴图拥有独立且唯一的坐标。展开使用 Blender 的 Smart UV Project（默认 `angle_limit=66°`），再用 Pack Islands 收紧排布。执行时会临时 Reveal Edit Mode 中隐藏的网格元素，使完整渲染几何都参与展开，随后恢复原有隐藏和选择状态；否则 Blender 的 Select All 会跳过隐藏面，使新 UV 坍缩在 `(0,0)`
 
 <img src="https://cdn.nlark.com/yuque/0/2026/png/23115229/1788503830521-9e864f07-fc74-4f76-bbee-a08d5f3d0307.png" width="265" title="" crop="0,0,1,1" id="u69e9b67d" class="ne-image">
 
-插件同时提供UV质检，检查模型UV是否存在翻转、越界、重叠等退化情况，Mode B在自动展UV后将自动运行质检，若不通过将放宽参数迭代直到通过
+插件同时提供UV质检，检查模型UV是否存在翻转、越界、重叠等退化情况，Mode B在自动展UV后将自动运行质检，若不通过将放宽参数迭代直到通过。极少量零面积三角形由光栅器跳过并给出警告，只有比例超过 0.1% 才会阻断整条管线
 
 ## 磨损效果重投影
 在准备好目标mesh的 UV 后，进入重投影阶段。插件先把每个 UV 三角形光栅化，在有效 texel 上保存 triangle id 和重心坐标。已知三角形顶点 `(V0,V1,V2)` ，可以直接恢复该 texel 的世界空间位置与法线：

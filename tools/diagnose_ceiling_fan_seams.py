@@ -46,7 +46,7 @@ from ai_wear.uv import rasterizer, seam_registry
 
 OBJECT_NAME = "ceiling_fan"
 LAYER_NAME = "AI_WearUV"
-RENDER_RESOLUTION = 1024
+RENDER_RESOLUTION = (2560, 1280)
 
 
 class ImmediateBridge:
@@ -194,8 +194,63 @@ def _appearance_effect(threshold, worn, amount01, feather01):
     return delta * (gate * worn[..., 3])[..., None]
 
 
+def _legacy_sample(field, uvs, res):
+    """The pre-0.3.5 half-texel-shifted sampler, retained for exact A/B."""
+    x = np.clip(uvs[:, 0] * res, 0, res - 1.001)
+    y = np.clip(uvs[:, 1] * res, 0, res - 1.001)
+    x0 = np.floor(x).astype(np.int64); x1 = x0 + 1
+    y0 = np.floor(y).astype(np.int64); y1 = y0 + 1
+    fx = (x - x0).astype(np.float32); fy = (y - y0).astype(np.float32)
+    a = field[y0, x0]; b = field[y0, x1]
+    c = field[y1, x0]; d = field[y1, x1]
+    return (a * (1 - fx) * (1 - fy) + b * fx * (1 - fy)
+            + c * (1 - fx) * fy + d * fx * fy)
+
+
+def _legacy_stamp(field, x, y, value, radius):
+    res = field.shape[0]
+    x0 = max(0, x - radius); x1 = min(res, x + radius + 1)
+    y0 = max(0, y - radius); y1 = min(res, y + radius + 1)
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    distance = np.sqrt((xx - x) ** 2 + (yy - y) ** 2)
+    weight = np.clip(1.0 - distance / max(1.0, float(radius)), 0.0, 1.0)
+    region = field[y0:y1, x0:x1]
+    blended = region * (1.0 - weight) + value * weight
+    field[y0:y1, x0:x1] = np.maximum(region, blended)
+
+
+def _legacy_fuse(field, registry, res, diffuse_texels=8, tol=None, valid=None):
+    """Exact legacy max/stamp implementation used before plugin 0.3.5."""
+    out = field.copy()
+    tolerance = 0.02 if tol is None else float(tol)
+    radius = max(1, int(diffuse_texels) // 4)
+    t = np.linspace(0.05, 0.95, max(8, res // 16))
+    for pair in registry:
+        ua = pair.uv_a0[None] * (1 - t[:, None]) + pair.uv_a1[None] * t[:, None]
+        ub = pair.uv_b0[None] * (1 - t[:, None]) + pair.uv_b1[None] * t[:, None]
+        va = _legacy_sample(out, ua, res)
+        vb = _legacy_sample(out, ub, res)
+        merged = np.maximum(va, vb)
+        for index in np.nonzero(np.abs(va - vb) > tolerance)[0]:
+            xa = int(np.clip(ua[index, 0] * res, 0, res - 1))
+            ya = int(np.clip(ua[index, 1] * res, 0, res - 1))
+            xb = int(np.clip(ub[index, 0] * res, 0, res - 1))
+            yb = int(np.clip(ub[index, 1] * res, 0, res - 1))
+            _legacy_stamp(out, xa, ya, float(merged[index]), radius)
+            _legacy_stamp(out, xb, yb, float(merged[index]), radius)
+    return out
+
+
+def _legacy_fuse_rgb(field_rgb, registry, res, diffuse_texels=8, valid=None):
+    out = np.empty_like(field_rgb)
+    for channel in range(field_rgb.shape[2]):
+        out[..., channel] = _legacy_fuse(
+            field_rgb[..., channel], registry, res, diffuse_texels)
+    return out
+
+
 def _symmetric_fuse(field: np.ndarray, registry, res: int,
-                    diffuse_texels: int = 8, tol=None) -> np.ndarray:
+                    diffuse_texels: int = 8, tol=None, valid=None) -> np.ndarray:
     """Order-independent experimental seam blend used as an A/B candidate."""
     original = np.asarray(field, dtype=np.float32)
     if not registry:
@@ -245,7 +300,7 @@ def _symmetric_fuse(field: np.ndarray, registry, res: int,
     return original * (1.0 - strength) + target * strength
 
 
-def _symmetric_fuse_rgb(field_rgb, registry, res, diffuse_texels=8):
+def _symmetric_fuse_rgb(field_rgb, registry, res, diffuse_texels=8, valid=None):
     out = np.empty_like(field_rgb)
     for channel in range(field_rgb.shape[2]):
         out[..., channel] = _symmetric_fuse(
@@ -257,7 +312,7 @@ _PAIR_CENTRES = {}
 
 
 def _profile_fuse(field: np.ndarray, registry, res: int,
-                  diffuse_texels: int = 8, tol=None) -> np.ndarray:
+                  diffuse_texels: int = 8, tol=None, valid=None) -> np.ndarray:
     """Match corresponding inward strips, not only the one-pixel seam line."""
     original = np.asarray(field, dtype=np.float32)
     if not registry:
@@ -309,7 +364,7 @@ def _profile_fuse(field: np.ndarray, registry, res: int,
     return original * (1.0 - strength) + target * strength
 
 
-def _profile_fuse_rgb(field_rgb, registry, res, diffuse_texels=8):
+def _profile_fuse_rgb(field_rgb, registry, res, diffuse_texels=8, valid=None):
     out = np.empty_like(field_rgb)
     for channel in range(field_rgb.shape[2]):
         out[..., channel] = _profile_fuse(
@@ -322,13 +377,15 @@ def _make_closeup_camera(scene, obj):
     z_min = min(c.z for c in world_corners)
     z_max = max(c.z for c in world_corners)
     centre = sum(world_corners, Vector()) / len(world_corners)
-    target = Vector((centre.x, centre.y, z_min + 0.115 * (z_max - z_min)))
+    # A 2:1 frame around only the lower base.  The earlier square shot placed
+    # the seam in the upper half and wasted roughly one third on empty floor.
+    target = Vector((centre.x, centre.y, z_min + 0.155 * (z_max - z_min)))
     camera_data = bpy.data.cameras.new("AIWear_FanBaseCloseupData")
-    camera_data.lens = 62.0
+    camera_data.lens = 68.0
     camera = bpy.data.objects.new("AIWear_FanBaseCloseup", camera_data)
     scene.collection.objects.link(camera)
-    direction = Vector((0.65, -1.0, 0.20)).normalized()
-    camera.location = target + direction * 0.72
+    direction = Vector((0.30, -1.0, 0.07)).normalized()
+    camera.location = target + direction * 0.65
     camera.rotation_euler = (target - camera.location).to_track_quat("-Z", "Y").to_euler()
     return camera, z_min, z_max
 
@@ -420,7 +477,9 @@ resolution = int(manifest.get("work_resolution", 1024))
 assert resolution == 1024, resolution
 
 stamp = time.strftime("%Y%m%d_%H%M%S")
-result_dir = cache_dir / ("fan_base_seam_diagnosis_" + stamp)
+review_only = "--review" in sys.argv
+folder_prefix = "fan_base_seam_review_2k_" if review_only else "fan_base_seam_diagnosis_"
+result_dir = cache_dir / (folder_prefix + stamp)
 result_dir.mkdir(parents=True, exist_ok=False)
 
 canonical = [manifest_path, cache_dir / "AIWear_UVSnapshot.npz",
@@ -472,7 +531,14 @@ original_settings = {
 
 production_only = "--production" in sys.argv
 tuning_only = "--tuning" in sys.argv
-if production_only:
+if review_only:
+    arms = (
+        ("01_raw", False, 8, False, 0, "current", 2.0),
+        ("02_legacy_f8_no_padding", True, 8, False, 0, "legacy", 2.0),
+        ("03_legacy_f8_padding16", True, 8, True, 16, "legacy", 2.0),
+        ("04_production_f8_padding2", True, 8, True, 2, "current", 2.0),
+    )
+elif production_only:
     arms = (
         ("production_f8_p2", True, 8, True, 2, "current", 2.0),
     )
@@ -515,6 +581,9 @@ with tempfile.TemporaryDirectory(prefix="aiwear_fan_seam_backup_") as backup_nam
             elif algorithm == "profile":
                 seam_registry.fuse_seam = _profile_fuse
                 seam_registry.fuse_seam_rgb = _profile_fuse_rgb
+            elif algorithm == "legacy":
+                seam_registry.fuse_seam = _legacy_fuse
+                seam_registry.fuse_seam_rgb = _legacy_fuse_rgb
             else:
                 seam_registry.fuse_seam = original_fuse
                 seam_registry.fuse_seam_rgb = original_fuse_rgb
@@ -545,6 +614,8 @@ with tempfile.TemporaryDirectory(prefix="aiwear_fan_seam_backup_") as backup_nam
             render_path = arm_dir / "base_closeup.png"
             passes.render_clean(scene, camera, str(render_path),
                                 RENDER_RESOLUTION, lighting="neutral")
+            if review_only:
+                shutil.copy2(render_path, result_dir / f"{label}.png")
 
             threshold = _load_uv_rgba(cache_dir / "WearThreshold.png")[..., 0]
             m_wear = _load_uv_rgba(cache_dir / "M_Wear.png")[..., 0]
@@ -586,7 +657,9 @@ with tempfile.TemporaryDirectory(prefix="aiwear_fan_seam_backup_") as backup_nam
             obj, base_registry, "AIWear_FanBaseRegisteredSeams",
             (1.0, 0.01, 0.01), max(obj.dimensions) * 0.0018)
         overlay_objects.append(base_overlay)
-        overlay_path = result_dir / "base_registered_seams_red.png"
+        overlay_name = ("00_registered_seams.png" if review_only
+                        else "base_registered_seams_red.png")
+        overlay_path = result_dir / overlay_name
         passes.render_clean(scene, camera, str(overlay_path),
                             RENDER_RESOLUTION, lighting="neutral")
         summary["base_registered_overlay"] = str(overlay_path)
@@ -621,6 +694,23 @@ for label, arm in summary["arms"].items():
 summary_path = result_dir / "summary.json"
 summary_path.write_text(
     json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+if review_only:
+    rows = []
+    for label, arm in summary["arms"].items():
+        base = arm["base"]["AppearanceEffect"]
+        rows.append(
+            f"{label}: cross p95={base['cross']['p95']:.3f}, "
+            f"halo4 p95={base['halo_4px']['p95']:.3f}")
+    (result_dir / "README.txt").write_text(
+        "ceiling_fan base UV seam comparison\n"
+        "Render: 2560 x 1280; same camera and cached 8 views.\n\n"
+        "00_registered_seams.png: registered seams in red\n"
+        "01_raw.png: fusion off, padding off\n"
+        "02_legacy_f8_no_padding.png: legacy fusion 8, padding off\n"
+        "03_legacy_f8_padding16.png: legacy fusion 8, padding 16\n"
+        "04_production_f8_padding2.png: production fusion 8, padding 2\n\n"
+        + "\n".join(rows) + "\n",
+        encoding="utf-8")
 print("AIWEAR_FAN_SEAM_DIAGNOSIS_OK")
 print("AIWEAR_FAN_SEAM_DIAGNOSIS_DIR=" + str(result_dir))
 print("AIWEAR_FAN_SEAM_SUMMARY=" + json.dumps({
