@@ -480,6 +480,23 @@ footprint 会混入尚未填充的岛外像素；随后又把两侧完整的 8 t
 差异也降低约 9%，且渲染中不再出现旧版横线。当前建议仍是 `Seam Diffuse=8, Padding=2`；若使用
 旧版代码，仅调小 Diffuse 或关闭 Padding 不能根治边界采样污染。
 
+### 10.7 AI 遮挡轮廓不能直接当作表面纹理
+
+同一批 Qwen 六视图还暴露了另一类看似接缝、实际与 UV seam 无关的白色弧线。逐视角 Replay
+显示，只保留 V0 且关闭 Seam Fusion 时就能完整复现该弧线；红色 Seam Registry overlay 也不与
+它重合。把 Z-test epsilon 缩小十倍后白弧仍在，因此不是后方表面错误通过深度测试。
+
+根因在屏幕图像：V0 的 clean 与 worn 整体轮廓相近，但白色中壳遮挡黑色底座的边界移动了数个
+像素。`abs(worn-clean)` 会把这条前景轮廓识别成强磨损；clean 几何的 Z-buffer 在偏移后的像素处
+却认为底座可见，于是常规重投影把白色外壳残差写到了底座，形成一个在任何单张 AI 图中都找不到
+的椭圆印记。
+
+管线现在从 clean 几何深度图检测背景轮廓和深度突变，在其两侧建立约为图像宽度 `0.6%` 的保护
+带。保护带内 mask 归零、带符号 RGB residual 回到中性 `0.5`；平滑曲面内部保持不变，磨损是否
+靠近凸边仍由对象空间 Geometry Prior 决定。相同缓存下，底座外观跨缝 p95 从 `0.146` 降到
+`0.042`，白弧消失。这个步骤解决的是 AI 编辑的 occlusion-boundary leakage，不应与 Seam Fusion
+或 Island Padding 混为一类。
+
 ## 11. Shader 如何应用 AI 磨损
 
 插件不会把 AI 的 worn render 直接当 Base Color；那样会把视图光照烘进材质，再被 Blender

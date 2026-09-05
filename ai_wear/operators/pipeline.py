@@ -856,6 +856,8 @@ def _run_pipeline(job, snap, bridge):
                                            projection.extract_screen_mask(
                                                cp, wp, snap["render_resolution"],
                                                return_worn_rgb=True))
+        mask, worn_rgb, screen_safe = projection.reject_depth_edge_payload(
+            mask, worn_rgb, depth_buf, screen_coverage, cam_data["radius"])
         # Save the exact interpolated diff mask consumed by projection next to
         # clean_Vi/worn_Vi.  It is RGB grayscale (not red-channel-only) so it is
         # immediately readable in ordinary image viewers and review tools.
@@ -882,23 +884,26 @@ def _run_pipeline(job, snap, bridge):
             "lens": float(lens), "sensor_w": float(sensor_w),
             "radius": float(cam_data["radius"]),
             "confidence": float(conf),
+            "depth_edge_rejected_ratio": float(
+                1.0 - screen_safe.sum() / max(screen_coverage.sum(), 1)),
         })
         # accumulate (worker numpy)
+        depth_eps = _visibility_depth_epsilon(cam_data["radius"])
         projection.accumulate_view(
             acc_mask, acc_w, count, texel_pos, texel_norm, valid_idx,
             view, cam_loc, lens, sensor_w, rx, ry, depth_buf, mask,
-            snap["gamma"], depth_eps=max(cam_data["radius"] * 0.02, 1e-3))
+            snap["gamma"], depth_eps=depth_eps)
         # Accumulate the encoded clean→worn color residual into UV too (same
         # visibility/facing weight as the scalar diff mask).
         projection.accumulate_rgb_view(
             acc_rgb, acc_rgb_w, texel_pos, texel_norm, valid_idx,
             view, cam_loc, lens, sensor_w, rx, ry, depth_buf, worn_rgb,
-            snap["gamma"], depth_eps=max(cam_data["radius"] * 0.02, 1e-3))
+            snap["gamma"], depth_eps=depth_eps)
 
         # exposure per vertex (worker numpy)
         exposure_count += projection.vertex_visibility(
             uvfield.vpos, view, cam_loc, lens, sensor_w, rx, ry,
-            depth_buf, max(cam_data["radius"] * 0.02, 1e-3))
+            depth_buf, depth_eps)
 
         job.stage = JobStage.SURFACE
         # early-coverage check
@@ -1222,26 +1227,32 @@ def _run_replay(job, snap, bridge):
         worn_png = os.path.join(out_dir, rec["worn"])
         mask, _conf, worn_rgb = projection.extract_screen_mask(clean_png, worn_png, res, return_worn_rgb=True)
         diff_mask_png = os.path.join(out_dir, f"diff_mask_V{i}.png")
-        _save_view_diff_mask(diff_mask_png, mask)
         rec["mask"] = os.path.basename(diff_mask_png)
         view = np.array(rec["view"], dtype=np.float32)
         cam_loc = np.array(rec["cam_loc"], dtype=np.float32)
         lens = float(rec["lens"]); sensor_w = float(rec["sensor_w"])
         radius = float(rec["radius"])
         rx = ry = res
-        depth_buf, _cov = projection.rasterize_screen_depth(
+        depth_buf, screen_coverage = projection.rasterize_screen_depth(
             uvfield.vpos, uvfield.tri_vert, view, lens, sensor_w, rx, ry)
+        mask, worn_rgb, screen_safe = projection.reject_depth_edge_payload(
+            mask, worn_rgb, depth_buf, screen_coverage, radius)
+        rec["depth_edge_rejected_ratio"] = float(
+            1.0 - screen_safe.sum() / max(screen_coverage.sum(), 1))
+        # The persisted mask is the exact guarded payload consumed below.
+        _save_view_diff_mask(diff_mask_png, mask)
+        depth_eps = _visibility_depth_epsilon(radius)
         projection.accumulate_view(
             acc_mask, acc_w, count, texel_pos, texel_norm, valid_idx,
             view, cam_loc, lens, sensor_w, rx, ry, depth_buf, mask,
-            snap["gamma"], depth_eps=max(radius * 0.02, 1e-3))
+            snap["gamma"], depth_eps=depth_eps)
         projection.accumulate_rgb_view(
             acc_rgb, acc_rgb_w, texel_pos, texel_norm, valid_idx,
             view, cam_loc, lens, sensor_w, rx, ry, depth_buf, worn_rgb,
-            snap["gamma"], depth_eps=max(radius * 0.02, 1e-3))
+            snap["gamma"], depth_eps=depth_eps)
         exposure_count += projection.vertex_visibility(
             uvfield.vpos, view, cam_loc, lens, sensor_w, rx, ry,
-            depth_buf, max(radius * 0.02, 1e-3))
+            depth_buf, depth_eps)
         job.stage = JobStage.SURFACE
         job.meta["coverage"] = float((count.reshape(res, res) > 0).sum()) / float(res * res)
 
@@ -1422,6 +1433,11 @@ def _set_ai_progress(job, p, msg, view_index=0, view_count=1):
     job.touch()
 
 
+def _visibility_depth_epsilon(radius: float) -> float:
+    """Scale-relative tolerance for the self-consistent software Z test."""
+    return max(float(radius) * 0.02, 1e-3)
+
+
 def _cam_proj_data(cam, target_obj, res):
     import bpy
     import numpy as np_
@@ -1429,7 +1445,7 @@ def _cam_proj_data(cam, target_obj, res):
     # Framing (bounding-sphere radius) is of the TARGET MESH, not the camera.
     # Cameras carry no geometry, so compute_framing(camera) would raise "Object
     # does not have geometry data" on to_mesh(). The radius feeds the per-view
-    # depth epsilon used by the software z-buffer visibility test below.
+    # scale used by the software z-buffer visibility tolerance below.
     dg = bpy.context.evaluated_depsgraph_get()
     _center, radius = compute_framing(target_obj, dg)
     return {

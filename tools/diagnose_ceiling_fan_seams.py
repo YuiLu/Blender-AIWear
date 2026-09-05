@@ -532,12 +532,20 @@ original_settings = {
 production_only = "--production" in sys.argv
 tuning_only = "--tuning" in sys.argv
 latest_only = "--latest" in sys.argv
+view_isolation = "--view-isolation" in sys.argv
 if review_only:
     arms = (
         ("01_raw", False, 8, False, 0, "current", 2.0),
         ("02_legacy_f8_no_padding", True, 8, False, 0, "legacy", 2.0),
         ("03_legacy_f8_padding16", True, 8, True, 16, "legacy", 2.0),
         ("04_production_f8_padding2", True, 8, True, 2, "current", 2.0),
+    )
+elif view_isolation:
+    # Replay one saved clean/worn pair at a time. This localizes a projected
+    # artifact to its source view without another AI request.
+    arms = tuple(
+        (f"view_{index}", False, 8, True, 2, "current", 2.0, index)
+        for index in range(len(manifest.get("views", [])))
     )
 elif production_only:
     arms = (
@@ -587,7 +595,9 @@ with tempfile.TemporaryDirectory(prefix="aiwear_fan_seam_backup_") as backup_nam
 
     overlay_objects = []
     try:
-        for label, fuse, diffuse, padding, padding_texels, algorithm, gamma in arms:
+        for arm in arms:
+            label, fuse, diffuse, padding, padding_texels, algorithm, gamma = arm[:7]
+            view_index = arm[7] if len(arm) > 7 else None
             if algorithm == "symmetric":
                 seam_registry.fuse_seam = _symmetric_fuse
                 seam_registry.fuse_seam_rgb = _symmetric_fuse_rgb
@@ -612,6 +622,13 @@ with tempfile.TemporaryDirectory(prefix="aiwear_fan_seam_backup_") as backup_nam
             snap["target_uv_layer"] = LAYER_NAME
             snap["work_resolution"] = resolution
             snap["save_experiment_snapshot"] = False
+
+            if view_index is not None:
+                isolated_manifest = dict(manifest)
+                isolated_manifest["views"] = [manifest["views"][view_index]]
+                manifest_path.write_text(
+                    json.dumps(isolated_manifest, ensure_ascii=False, indent=2),
+                    encoding="utf-8")
 
             job = job_cache.create_job()
             started = time.perf_counter()
@@ -643,6 +660,7 @@ with tempfile.TemporaryDirectory(prefix="aiwear_fan_seam_backup_") as backup_nam
                 "padding": padding,
                 "padding_texels": padding_texels,
                 "gamma": gamma,
+                "source_view": view_index,
                 "elapsed_seconds": round(elapsed, 3),
                 "job_seam_before_p95": job.meta.get("seam_before_p95"),
                 "job_seam_after_p95": job.meta.get("seam_after_p95"),

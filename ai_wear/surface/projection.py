@@ -191,6 +191,65 @@ def extract_screen_mask(clean_png: str, worn_png: str, res: int,
     return mask, confidence
 
 
+def reject_depth_edge_payload(screen_mask: np.ndarray,
+                              encoded_rgb: np.ndarray,
+                              depth_buf: np.ndarray,
+                              coverage: np.ndarray,
+                              radius: float,
+                              guard_pixels: Optional[int] = None,
+                              jump_fraction: float = 0.005) -> Tuple:
+    """Neutralize unreliable image-edit differences at occlusion boundaries.
+
+    Image-edit models can preserve the overall silhouette while moving a part
+    boundary by a few pixels.  At such pixels the clean-geometry Z buffer says
+    "rear surface", while the edited image contains the foreground part.  A
+    mathematically correct reprojection then stamps that foreground rim onto the
+    rear surface.  This is especially visible as long white arcs on dark parts.
+
+    We identify background silhouettes and sharp depth discontinuities in the
+    clean geometry, dilate them by a small screen-space guard, and make the
+    scalar mask zero / signed RGB residual neutral there.  Smooth depth changes
+    on one surface are retained, as are geometric-edge priors computed later in
+    object space.
+    """
+    mask = np.asarray(screen_mask, dtype=np.float32).copy()
+    rgb = np.asarray(encoded_rgb, dtype=np.float32).copy()
+    depth = np.asarray(depth_buf, dtype=np.float32)
+    covered = np.asarray(coverage, dtype=bool)
+    if mask.shape != covered.shape or depth.shape != covered.shape:
+        return mask, rgb, covered.copy()
+
+    jump = max(abs(float(radius)) * float(jump_fraction), 1e-5)
+    depth_pad = np.pad(depth, 1, mode="edge")
+    cover_pad = np.pad(covered, 1, mode="constant", constant_values=False)
+    edge = np.zeros_like(covered, dtype=bool)
+    for dy, dx in ((0, 1), (1, 0), (1, 2), (2, 1)):
+        neighbour_depth = depth_pad[dy:dy + depth.shape[0],
+                                    dx:dx + depth.shape[1]]
+        neighbour_cover = cover_pad[dy:dy + depth.shape[0],
+                                    dx:dx + depth.shape[1]]
+        edge |= covered & (
+            ~neighbour_cover | (np.abs(depth - neighbour_depth) > jump))
+
+    # About 0.6% of the render width: 3 px at 512, 6 px at 1024 and 12 px at
+    # 2048. Image-edit boundary drift scales with image resolution.
+    guard = (max(2, int(round(min(depth.shape) * 0.006)))
+             if guard_pixels is None else max(0, int(guard_pixels)))
+    blocked = edge
+    for _ in range(guard):
+        pad = np.pad(blocked, 1, mode="constant", constant_values=False)
+        blocked = np.zeros_like(blocked)
+        for dy in range(3):
+            for dx in range(3):
+                blocked |= pad[dy:dy + depth.shape[0],
+                               dx:dx + depth.shape[1]]
+    safe = covered & ~blocked
+    mask[~safe] = 0.0
+    if rgb.ndim == 3 and rgb.shape[:2] == covered.shape:
+        rgb[~safe] = 0.5
+    return mask, rgb, safe
+
+
 # --- accumulation -----------------------------------------------------------
 
 def _select_facing(texel_pos: np.ndarray, texel_norm: np.ndarray,
