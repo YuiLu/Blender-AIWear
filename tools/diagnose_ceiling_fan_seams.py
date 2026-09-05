@@ -531,6 +531,7 @@ original_settings = {
 
 production_only = "--production" in sys.argv
 tuning_only = "--tuning" in sys.argv
+latest_only = "--latest" in sys.argv
 if review_only:
     arms = (
         ("01_raw", False, 8, False, 0, "current", 2.0),
@@ -541,6 +542,18 @@ if review_only:
 elif production_only:
     arms = (
         ("production_f8_p2", True, 8, True, 2, "current", 2.0),
+    )
+elif latest_only:
+    # Focused rerun for the current Qwen/First-view-Anchor six-view cache.  This
+    # directly compares the user's seam-off/padding-2 image with progressively
+    # wider production fusion bands while keeping every other input identical.
+    arms = (
+        ("off_p2", False, 8, True, 2, "current", 2.0),
+        ("f1_p2", True, 1, True, 2, "current", 2.0),
+        ("f2_p2", True, 2, True, 2, "current", 2.0),
+        ("f4_p2", True, 4, True, 2, "current", 2.0),
+        ("f8_p2", True, 8, True, 2, "current", 2.0),
+        ("f8_no_padding", True, 8, False, 0, "current", 2.0),
     )
 elif tuning_only:
     arms = (

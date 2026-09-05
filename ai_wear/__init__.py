@@ -16,7 +16,7 @@ See README.md for install / config / workflow mapping.
 bl_info = {
     "name": "AI Wear Texture",
     "author": "AI Wear Texture — implementation per plan",
-    "version": (0, 3, 8),
+    "version": (0, 3, 9),
     "blender": (3, 6, 0),
     "location": "View3D > Sidebar (N) > AI Wear",
     "description": "AI-driven model wear-texture generation: UV QC, surface field, "

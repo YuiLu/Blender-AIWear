@@ -873,6 +873,10 @@ def _run_pipeline(job, snap, bridge):
             "context_mode": context_mode,
             "context_source": (os.path.basename(context_path)
                                if context_path else None),
+            # Persist the exact text sent for this view. In context modes views
+            # 1..N include an extra role-clarification clause, so the scene's
+            # base prompt alone is not a complete audit record.
+            "prompt": view_prompt,
             "view": [list(map(float, row)) for row in np.asarray(view).tolist()],
             "cam_loc": [float(x) for x in np.asarray(cam_loc).ravel().tolist()],
             "lens": float(lens), "sensor_w": float(sensor_w),

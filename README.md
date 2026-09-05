@@ -125,7 +125,8 @@ Fibonacci 点不会恰好落在正方体顶点，但同样都是斜向视角，�
 
 该输入只在 Provider 声明支持参考图时生效，目前内置实现中是 Gemini 与 Qwen Image。ComfyUI 的可移植
 原生 inpaint 图不带 IP-Adapter，因此不伪装成支持跨图 context。每个视角实际使用的
-`context_source` 会写入 `views.json`，实验时可以检查，而不是只相信 UI 开关。
+`context_source` 和最终发送的完整 `prompt` 都会写入 `views.json`，实验时可以检查，而不是
+只相信 UI 开关或根据面板字段反推。
 
 旋转对称或高度重复的模型并非不能使用多视角，但它缺少稳定的方位身份：从不同方位看到的
 轮廓近乎可互换时，独立生成更容易把划痕旋转、镜像或重新布局。此类资产应优先使用真正生效的
@@ -396,17 +397,19 @@ side B: uv_b(t) = (1-t)·b0 + t·b1
 
 ### 10.3 融合
 
-沿同一拓扑位置 `t` 和相同的岛内距离 `d` 双线性采样两侧：
+沿同一拓扑位置 `t`，先在两侧各向岛内偏移半个 texel，读取最近的有效边界 texel：
 
 ```text
-value(t,d) = 0.5 · (sample(A,t,d) + sample(B,t,d))
+delta(t) = 0.5 · (sample(B,t,0.5) - sample(A,t,0.5))
+A'(t,d) = A(t,d) + falloff(d) · delta(t)
+B'(t,d) = B(t,d) - falloff(d) · delta(t)
 ```
 
-插件不再只在边界 texel 上做固定 stamp，而是把两侧一条宽度为 `Seam Diffuse` 的对应窄带
-对称平均，并从 seam 向岛内衰减。采样使用 `uv·resolution-0.5` 的 texel-center 约定；所有 seam
-先从原图读取、再统一写回，避免 mesh 遍历顺序影响结果。WearThreshold、WornTex RGB 和 mask
-alpha 都执行配对融合，以降低 mask 已连续但颜色仍跳变的概率。这里必须使用对称平均：三张图
-对“数值更大”的语义并不相同，统一取最大会把 RGB 残差和 alpha 推成沿 seam 的亮带。
+算法只把边界差的一半分别加到 A、从 B 减去，使第一行 texel 在不改变共同能量的情况下相遇；
+这份校正再在 `Seam Diffuse` 宽度内向岛内衰减。它不会把整个窄带替换成两侧平均值，因此能保留
+各岛原有的划痕和颗粒。所有 seam 先从原图读取、再统一累积写回，避免 mesh 遍历顺序影响结果。
+WearThreshold、WornTex RGB 和 mask alpha 都执行同样的配对校正。采样不能落在数学意义上的 UV
+边界：Padding 之前，该位置的双线性 footprint 会混入岛外黑色或中性色，再把污染值写回成暗线。
 
 ### 10.4 Padding 不是 Seam Fusion
 
@@ -456,23 +459,26 @@ seam 的两侧配对，在烘焙后的纹理上做双线性采样，结果如下
 
 ### 10.6 `ceiling_fan` 底座复现实验
 
-在 Blender 5.1.2 中，对同一批 Auto 8 缓存执行真实 Replay。底座被标记的水平线属于 Registry
-能够配对的 manifold UV seam，并不是开口边或拆分顶点；底座范围内共统计到 556 条可配对 seam。
-该缓存虽然选择了 First-view Anchor，但 Provider 报告 `view_context_supported=false`，八个
-`context_source` 均为空，因此实际仍是独立多视角。
+在 Blender 5.1.2 中，对 2026-09-05 14:49 的同一批 Qwen Image 3.0 六视图缓存执行真实 Replay，
+不重新调用 AI，只改变后处理。该次 `First-view Anchor` 已真实生效：V1–V5 的 `context_source`
+都是 `worn_V0.png`。截图中的水平线也确实属于 Registry 能配对的 manifold UV seam；底座范围内
+共统计到 556 条。
 
-| 分支 | 最终外观跨缝 p95 | seam 周围 4px 亮带 p95 |
+| 分支 | 最终外观跨缝 p95 | seam 周围 4px 带状差异 p95 |
 | --- | ---: | ---: |
-| 无 Fusion / 无 Padding | 0.322 | 0.380 |
-| 旧 Fusion 8 / 无 Padding | **0.165** | 0.436 |
-| 旧 Fusion 8 / Padding 16 | 0.342 | 0.358 |
-| 生产版对应窄带 Fusion 8 / Padding 2 | 0.210 | **0.241** |
-| 对应窄带 Fusion 8 / 无 Padding（实验分支） | 0.168 | 0.292 |
+| Fusion off / Padding 2 | 0.340 | 0.313 |
+| 修复前 Fusion 8 / Padding 2 | 0.192 | **0.229** |
+| 修复后 Fusion 8 / Padding 2 | **0.146** | 0.286 |
 
-原始 `M_Wear` 的底座跨缝 p95 已达到 0.289，说明不一致在 UV 后处理之前已经存在；旧 Fusion
-虽然压低边界两侧的瞬时差值，却把邻域亮带推高。16 texel Padding 又使 Worn alpha 跨缝 p95
-升至 0.688，并在渲染中产生大块亮斑。实际推荐从 `Seam Diffuse=8, Padding=2` 开始；若资产只
-用于近景且不依赖低 mip，可以把 Padding 暂时降为 0。不要通过增大 Seam Diffuse 掩盖生图不一致。
+这次“关闭反而更好看”不是错觉。修复前算法在 Padding 之前直接沿数学 UV 边界做双线性采样，
+footprint 会混入尚未填充的岛外像素；随后又把两侧完整的 8 texel 窄带替换成共同平均轮廓。
+因此它虽然把 A/B 数值差和统计指标压低，却可能制造一条两侧同样暗、肉眼反而更整齐醒目的横带。
+单看跨缝差值无法发现这种 common-mode halo。
+
+修复版改为在边界两侧各向岛内偏移半个 texel，要求配对 texel 都有效，只计算边界差并把校正量
+向内衰减，不再平均整条纹理带。同一缓存下，跨缝 p95 相对 Fusion off 降低约 57%，4px 邻域带状
+差异也降低约 9%，且渲染中不再出现旧版横线。当前建议仍是 `Seam Diffuse=8, Padding=2`；若使用
+旧版代码，仅调小 Diffuse 或关闭 Padding 不能根治边界采样污染。
 
 ## 11. Shader 如何应用 AI 磨损
 

@@ -108,6 +108,13 @@ def seam_qa(field: np.ndarray, registry: List[SeamPair], res: int,
         t = np.linspace(0.05, 0.95, samples)
         ua = sp.uv_a0[None] * (1 - t[:, None]) + sp.uv_a1[None] * t[:, None]
         ub = sp.uv_b0[None] * (1 - t[:, None]) + sp.uv_b1[None] * t[:, None]
+        # The exact UV edge lies between texel centres. Before padding, a
+        # bilinear footprint there can include the zero/neutral island exterior
+        # and report a discontinuity that is not visible after texture sampling.
+        # Measure the first interior texel row on each side instead.
+        if sp.uv_a_inward is not None and sp.uv_b_inward is not None:
+            ua = ua + np.asarray(sp.uv_a_inward)[None] * (0.5 / res)
+            ub = ub + np.asarray(sp.uv_b_inward)[None] * (0.5 / res)
         va = _bilinear_sample(field, ua, res)
         vb = _bilinear_sample(field, ub, res)
         diffs.extend(np.abs(va - vb).tolist())
@@ -125,17 +132,17 @@ def fuse_seam(field: np.ndarray, registry: List[SeamPair], res: int,
               valid: Optional[np.ndarray] = None) -> np.ndarray:
     """Symmetrically reconcile corresponding strips on both sides of a seam.
 
-    The previous implementation sampled only the boundary, took ``max`` and
-    monotonically raised nearby texels.  That has incompatible meanings for the
-    three fields using it: a larger alpha means more wear, a larger
-    WearThreshold means *later* wear, and RGB stores a signed residual around
-    neutral 0.5.  It could reduce the exact A/B difference while creating the
-    bright seam band visible on the ceiling-fan base.
+    Earlier implementations either took ``max`` around the boundary or replaced
+    corresponding strips with their mean.  The former has incompatible meanings
+    for WearThreshold, alpha and signed RGB residuals; the latter can reduce the
+    exact A/B difference while creating a common dark/bright seam band.
 
-    This implementation samples both islands at equal edge parameter and equal
-    inward texel distance, averages them symmetrically, and fades that common
-    profile back to the original signal.  Accumulation is order-independent so
-    intersecting seams cannot overwrite one another according to mesh order.
+    This implementation samples the first valid interior row on both islands,
+    splits only that boundary difference equally between them, and fades the
+    correction inward.  It deliberately preserves each island's own interior
+    texture instead of replacing an entire strip with a shared average profile.
+    Accumulation is order-independent so intersecting seams cannot overwrite one
+    another according to mesh order.
     """
     original = np.asarray(field, dtype=np.float32)
     if not registry:
@@ -145,13 +152,19 @@ def fuse_seam(field: np.ndarray, registry: List[SeamPair], res: int,
     accum = np.zeros_like(original, dtype=np.float32)
     weights = np.zeros_like(original, dtype=np.float32)
 
-    def _accumulate(uvs: np.ndarray, values: np.ndarray, strength: float) -> None:
+    def _texel_indices(uvs: np.ndarray):
         inside = ((uvs[:, 0] >= 0.0) & (uvs[:, 0] <= 1.0)
                   & (uvs[:, 1] >= 0.0) & (uvs[:, 1] <= 1.0))
         xs = np.clip(np.floor(uvs[:, 0] * res).astype(np.int64), 0, res - 1)
         ys = np.clip(np.floor(uvs[:, 1] * res).astype(np.int64), 0, res - 1)
         if valid is not None:
             inside &= valid[ys, xs]
+        return xs, ys, inside
+
+    def _accumulate(uvs: np.ndarray, values: np.ndarray, strength: float,
+                    active: np.ndarray) -> None:
+        xs, ys, inside = _texel_indices(uvs)
+        inside &= active
         if not inside.any():
             return
         xs = xs[inside]; ys = ys[inside]
@@ -168,23 +181,46 @@ def fuse_seam(field: np.ndarray, registry: List[SeamPair], res: int,
         edge_a = sp.uv_a0[None] * (1.0 - t[:, None]) + sp.uv_a1[None] * t[:, None]
         edge_b = sp.uv_b0[None] * (1.0 - t[:, None]) + sp.uv_b1[None] * t[:, None]
         has_profile = sp.uv_a_inward is not None and sp.uv_b_inward is not None
-        max_distance = width if has_profile else 0
+        max_distance = width if has_profile else 1
         inward_a = (np.asarray(sp.uv_a_inward) if has_profile
                     else np.zeros(2, dtype=np.float64))
         inward_b = (np.asarray(sp.uv_b_inward) if has_profile
                     else np.zeros(2, dtype=np.float64))
-        for distance in range(max_distance + 1):
-            ua = edge_a + inward_a[None] * (distance / res)
-            ub = edge_b + inward_b[None] * (distance / res)
-            va = _bilinear_sample(original, ua, res)
-            vb = _bilinear_sample(original, ub, res)
-            active = np.abs(va - vb) > tolerance
+        boundary_inset = 0.5
+        boundary_a = edge_a + inward_a[None] * (boundary_inset / res)
+        boundary_b = edge_b + inward_b[None] * (boundary_inset / res)
+        x0a, y0a, boundary_valid_a = _texel_indices(boundary_a)
+        x0b, y0b, boundary_valid_b = _texel_indices(boundary_b)
+        boundary_a_values = original[y0a, x0a]
+        boundary_b_values = original[y0b, x0b]
+        boundary_active = (
+            boundary_valid_a & boundary_valid_b
+            & (np.abs(boundary_a_values - boundary_b_values) > tolerance))
+        # A receives +correction and B receives -correction. At the edge this
+        # brings both to their mean without changing their common energy.
+        correction = 0.5 * (boundary_b_values - boundary_a_values)
+        for distance in range(max_distance):
+            # Sample at texel centres *inside* each island. Sampling directly on
+            # the mathematical UV boundary before padding blends island data
+            # with its zero/neutral exterior, then writes that contaminated value
+            # back as a visible dark/bright ring. Nearest valid texels are also
+            # more stable than a bilinear footprint along diagonal island edges.
+            inset = distance + 0.5
+            ua = edge_a + inward_a[None] * (inset / res)
+            ub = edge_b + inward_b[None] * (inset / res)
+            xa, ya, valid_a = _texel_indices(ua)
+            xb, yb, valid_b = _texel_indices(ub)
+            paired_valid = valid_a & valid_b
+            va = original[ya, xa]
+            vb = original[yb, xb]
+            active = paired_valid & boundary_active
             if not active.any():
                 continue
-            merged = 0.5 * (va + vb)
-            strength = float(1.0 - distance / (max_distance + 1.0))
-            _accumulate(ua[active], merged[active], strength)
-            _accumulate(ub[active], merged[active], strength)
+            strength = float(1.0 - distance / max_distance)
+            _accumulate(ua, np.clip(va + correction, 0.0, 1.0),
+                        strength, active)
+            _accumulate(ub, np.clip(vb - correction, 0.0, 1.0),
+                        strength, active)
 
     touched = weights > 1e-8
     target = original.copy()

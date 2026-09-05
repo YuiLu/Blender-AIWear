@@ -132,7 +132,7 @@ $ \mathtt{final\_mask}=g\cdot\mathtt{WornTex.alpha} $
 
 这里把直接针对接缝的处理和padding两种处理明确分开：
 
-+ Seam Fusion 直接针对接缝进行处理，遍历恰好连接两个面的拓扑边，如果同一端点在两个 face loop 上的 UV 不同，就登记为一条 UV seam；随后在相同的三维边参数 `t` 与岛内距离 `d` 上采样两侧，对称平均后按距离衰减写回。只修一行边界 texel 会留下亮带，而统一取最大又会混淆 WearThreshold、alpha 和带符号 RGB 残差三种不同语义
++ Seam Fusion 直接针对接缝进行处理，遍历恰好连接两个面的拓扑边，如果同一端点在两个 face loop 上的 UV 不同，就登记为一条 UV seam。算法在相同的三维边参数 `t` 上，从两侧各向岛内偏移半个 texel 读取有效边界值，把边界差的一半分别加到一侧、从另一侧减去，再让这份校正量在 `Seam Diffuse` 宽度内向内衰减。这样既让边界相遇，也不会把整条窄带的划痕和颗粒替换成共同平均值
 + Island Padding 用于避免纹理过滤读到黑色、中性色或邻近小岛（不能让原本不同的两侧数据自动一致），从 UV 岛有效区域向外 padding。Padding 必须小于 UV 岛间实际 gutter；默认使用 2 texel，而不是无条件扩张 16 texel
 
 对于重叠 UV、开口边、已经拆成不同顶点的几何或彼此不连通的部件，不存在可以自动找到的“两侧”，这类问题会直接被UV质检给挡掉
@@ -155,11 +155,11 @@ $ \mathtt{final\_mask}=g\cdot\mathtt{WornTex.alpha} $
 
 ## 消融3：接缝处理
 
-在 `ceiling_fan` 的底座上可以稳定复现接缝。Blender 5.1.2 的 Replay 实验确认，截图中的水平线属于可配对的 manifold UV seam，而不是开口边；但原始 `M_Wear` 在底座 seam 两侧的 p95 差异已经达到 0.289。该缓存选择了 First-view Anchor，实际 Provider 却不支持额外参考图，八个视角仍然独立生成，因此相邻面在重投影前后获得了明显不同的磨损证据。
+在 `ceiling_fan` 的底座上可以稳定复现接缝。Blender 5.1.2 的 Replay 实验确认，截图中的水平线属于可配对的 manifold UV seam，而不是开口边；底座范围内共登记了 556 条。最新一批输入是 Qwen Image 3.0 生成的六视图，First-view Anchor 也已真实生效：V1–V5 都以 `worn_V0.png` 为风格参考。因此这次异常不能归因于“上下文开关没有传给 Provider”。
 
-旧算法开启 Fusion、关闭 Padding 后，最终外观跨缝 p95 从 0.322 降到 0.165，说明 Fusion 确实命中了这条 seam；与此同时，seam 周围 4 texel 的带状对比从 0.380 上升到 0.436。再开启 16 texel Padding 后，跨缝 p95 回升到 0.342。问题因此不是单纯的“生图错误”或“Fusion 没运行”，而是独立视图不一致、只处理边界的最大值 Fusion，以及过大的 Padding 共同叠加。
+在完全相同的六张 clean/worn 图上，关闭 Fusion、保留 2 texel Padding 时，最终外观跨缝 p95 为 0.340；修复前开启 `Seam Diffuse=8` 后，这个数值降到 0.192，但画面中出现了更明显的暗色横线。原因是旧实现先在数学意义上的 UV 边界做双线性采样：Padding 尚未执行，采样 footprint 会混入岛外黑色或中性色；随后算法又把两侧整条窄带替换成共同平均轮廓。两侧变得更相等，所以跨缝指标变好，但它们一起变暗，形成指标看不出的 common-mode halo。
 
-改为生产版对应窄带对称融合，并把 Padding 降到 2 后，最终外观跨缝与邻域亮带 p95 分别为 0.210 和 0.241；实验分支关闭 Padding 时，跨缝可进一步降到 0.168，但远距离 mip 采样的安全余量更低。这个模型建议使用 `Seam Diffuse=8`、`Padding=2`，同时改用真正支持参考图的 Provider；继续增大 Seam Diffuse 或 Padding 都不能补救多视角生成的不一致。
+修复后，算法改在两侧各自的首行有效岛内 texel 取样，只把边界差的一半对称施加到两侧，再令校正量向内衰减。相同缓存和 `Seam Diffuse=8, Padding=2` 下，跨缝 p95 降到 0.146，4 texel 邻域的带状差异从关闭 Fusion 时的 0.313 降到 0.286；肉眼可见的横线也消失。这个结果说明生图确实带来了两侧差异，但“开启处理反而更明显”主要是 Seam Fusion 的边界取样和整带平均缺陷，不是继续加大 Diffuse 或 Padding 能解决的问题。
 
 
 
