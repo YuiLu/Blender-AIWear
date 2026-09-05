@@ -2,7 +2,10 @@
 
 Shot 1 (6 s): orbit once around world X from the Auto-8 oblique direction.
 Shot 2 (4 s): hold the camera and animate the actual AIWearMask/Wear Amount
-input from 0 to 0.6 (the UI's 0 to 60), never a material-wide alpha.
+input from 0.6 to 0 (the UI's 60 to 0), never a material-wide alpha.
+
+The scene HDRI remains connected for lighting and reflections, while camera
+rays see a neutral middle-gray World background.
 
 Run inside the open Blender process with no arguments. For composition QA from
 the command line, pass ``-- --preview`` to render frame 1 as a PNG only.
@@ -68,6 +71,56 @@ def _find_wear_inputs(meshes):
                 seen.add(socket.as_pointer())
                 sockets.append(socket)
     return sockets
+
+
+def _set_camera_gray_world(scene):
+    """Keep the World shader for lighting, but show gray to camera rays."""
+    world = scene.world
+    if world is None:
+        world = bpy.data.worlds.new(PREFIX + "World")
+        scene.world = world
+    world.use_nodes = True
+    tree = world.node_tree
+    output = next((node for node in tree.nodes
+                   if node.type == "OUTPUT_WORLD" and node.is_active_output), None)
+    if output is None:
+        output = tree.nodes.new("ShaderNodeOutputWorld")
+    surface = output.inputs.get("Surface")
+    if surface is None:
+        raise RuntimeError("The World output has no Surface input")
+
+    # Make reruns idempotent: unwrap our previous camera-ray mix first.
+    old_mix = tree.nodes.get(PREFIX + "WorldCameraMix")
+    if old_mix is not None and surface.is_linked:
+        current = surface.links[0].from_node
+        if current == old_mix and old_mix.inputs[1].is_linked:
+            source = old_mix.inputs[1].links[0].from_socket
+            tree.links.new(source, surface)
+    for name in (PREFIX + "WorldCameraMix", PREFIX + "WorldCameraGray",
+                 PREFIX + "WorldLightPath"):
+        node = tree.nodes.get(name)
+        if node is not None:
+            tree.nodes.remove(node)
+
+    source = surface.links[0].from_socket if surface.is_linked else None
+    if source is None:
+        fallback = tree.nodes.new("ShaderNodeBackground")
+        fallback.name = PREFIX + "WorldHDRIFallback"
+        fallback.inputs[0].default_value = (*world.color, 1.0)
+        source = fallback.outputs[0]
+
+    light_path = tree.nodes.new("ShaderNodeLightPath")
+    light_path.name = PREFIX + "WorldLightPath"
+    gray = tree.nodes.new("ShaderNodeBackground")
+    gray.name = PREFIX + "WorldCameraGray"
+    gray.inputs[0].default_value = (0.18, 0.18, 0.18, 1.0)
+    gray.inputs[1].default_value = 1.0
+    mix = tree.nodes.new("ShaderNodeMixShader")
+    mix.name = PREFIX + "WorldCameraMix"
+    tree.links.new(light_path.outputs["Is Camera Ray"], mix.inputs[0])
+    tree.links.new(source, mix.inputs[1])
+    tree.links.new(gray.outputs[0], mix.inputs[2])
+    tree.links.new(mix.outputs[0], surface)
 
 
 def _linearize(owner):
@@ -144,10 +197,10 @@ orbit_end = FPS * ORBIT_SECONDS
 ramp_start = orbit_end + 1
 final_frame = FPS * (ORBIT_SECONDS + RAMP_SECONDS)
 for socket in wear_inputs:
-    # The first shot displays the current final result. At the shot boundary the
-    # real threshold input resets to zero, then increases linearly to 0.6.
+    # The first shot displays the current final result. The fixed-camera shot
+    # then reduces the real threshold input linearly from 0.6 to zero.
     for frame, value in ((1, 0.6), (orbit_end, 0.6),
-                         (ramp_start, 0.0), (final_frame, 0.6)):
+                         (ramp_start, 0.6), (final_frame, 0.0)):
         socket.default_value = value
         socket.keyframe_insert("default_value", frame=frame)
     _linearize(socket.id_data)
@@ -155,7 +208,7 @@ for socket in wear_inputs:
 settings = getattr(scene, "ai_wear", None)
 if settings is not None:
     for frame, value in ((1, 60.0), (orbit_end, 60.0),
-                         (ramp_start, 0.0), (final_frame, 60.0)):
+                         (ramp_start, 60.0), (final_frame, 0.0)):
         settings.wear_amount = value
         settings.keyframe_insert("wear_amount", frame=frame)
     _linearize(scene)
@@ -164,12 +217,11 @@ for marker in list(scene.timeline_markers):
     if marker.name.startswith(PREFIX):
         scene.timeline_markers.remove(marker)
 scene.timeline_markers.new(PREFIX + "Orbit_6s", frame=1)
-scene.timeline_markers.new(PREFIX + "WearAmount_0_to_60_4s", frame=ramp_start)
+scene.timeline_markers.new(PREFIX + "WearAmount_60_to_0_4s", frame=ramp_start)
 
-# Preserve the user's World/HDRI and existing lights exactly. In particular,
-# do not synthesize an Area-light rig: the scene is physically small, so even
-# moderate-wattage helpers easily clip the material and stop matching the
-# Rendered viewport.
+# Keep the HDRI shader for non-camera rays, so illumination and reflections
+# match the Rendered viewport while the visible background stays neutral.
+_set_camera_gray_world(scene)
 
 scene.frame_start = 1
 scene.frame_end = final_frame
@@ -205,7 +257,7 @@ status = {
     "fps": FPS,
     "orbit_frames": [1, orbit_end],
     "wear_amount_frames": [ramp_start, final_frame],
-    "wear_amount_values": [0, 60],
+    "wear_amount_values": [60, 0],
     "animated_node_inputs": len(wear_inputs),
     "resolution": [RESOLUTION_X, RESOLUTION_Y],
     "output": str(preview_path if preview_only else video_path),
