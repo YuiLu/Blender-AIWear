@@ -27,18 +27,33 @@ class AIWEAR_PT_main(bpy.types.Panel):
             col.label(text="Select a mesh object.", icon="ERROR")
         col.prop(s, "wear_amount", slider=True)
         col.prop(s, "feather", slider=True)
+        from ..operators import pipeline
+        job = pipeline.get_active_job(context)
+        running = pipeline.is_running(context)
         row = col.row(align=True)
         row.scale_y = 1.4
-        row.operator("ai_wear.run_pipeline", icon="IMAGE_RGB")
-        from ..operators import pipeline
-        if pipeline.is_running(context):
+        if running and job is not None:
+            # Blender does not allow drawing over an operator widget. Replacing
+            # the button with a BAR progress widget in the exact same slot gives
+            # the intended button-overlay appearance while the job is active.
+            prog = max(0.0, min(1.0, float(job.progress)))
+            row.progress(
+                factor=prog,
+                type="BAR",
+                text=f"Generate Wear  {prog * 100:.0f}%",
+            )
             row.operator("ai_wear.cancel", text="", icon="CANCEL")
+        else:
+            row.operator("ai_wear.run_pipeline", icon="IMAGE_RGB")
         # Per-stage testing (Q3): replay only the downstream from the last run's
         # cached clean/worn images + camera matrices — no render, no AI. Lets you
         # iterate on surface/WearThreshold params without spending API budget.
         replay = col.row(align=True)
-        replay.enabled = not pipeline.is_running(context)
+        replay.enabled = not running
         replay.operator("ai_wear.replay_downstream", icon="FILE_REFRESH")
+        # Keep diagnostics next to the two run actions instead of dedicating a
+        # separate Progress panel to one log button and duplicate status UI.
+        col.operator("ai_wear.open_log", icon="CONSOLE")
 
 
 class AIWEAR_PT_uv(bpy.types.Panel):
@@ -215,12 +230,8 @@ CLASSES = (
 def register():
     for c in CLASSES:
         bpy.utils.register_class(c)
-    from .progress import AIWEAR_PT_progress
-    bpy.utils.register_class(AIWEAR_PT_progress)
 
 
 def unregister():
-    from .progress import AIWEAR_PT_progress
-    bpy.utils.unregister_class(AIWEAR_PT_progress)
     for c in reversed(CLASSES):
         bpy.utils.unregister_class(c)

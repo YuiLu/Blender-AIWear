@@ -764,7 +764,7 @@ def _run_pipeline(job, snap, bridge):
     for vi, cam_name in enumerate(cam_names):
         _check_cancel(job)
         job.message = f"View {vi+1}/{n_views}: rendering clean…"
-        job.progress = 0.08 + 0.45 * (vi / max(1, n_views))
+        job.progress = _capture_view_progress(vi, n_views, 0.0)
         clean_png = os.path.join(out_dir, f"clean_V{vi}.png")
         bridge.run(lambda cn=cam_name, cp=clean_png: passes.render_clean(
             bpy.context.scene, bpy.data.objects.get(cn), cp, snap["render_resolution"], job,
@@ -794,6 +794,7 @@ def _run_pipeline(job, snap, bridge):
         # AI generate (worker thread, HTTP only)
         job.state = JobState.AI; job.stage = JobStage.AI_SUBMIT
         job.message = f"View {vi+1}/{n_views}: AI generating…"
+        job.progress = _capture_view_progress(vi, n_views, 0.20)
         refs = []
         context_path = _select_view_context(
             context_mode, context_supported,
@@ -826,7 +827,8 @@ def _run_pipeline(job, snap, bridge):
                 "output_node": snap["prefs_obj"].output_node,
             } if snap["provider"] == "COMFYUI" else {},
             should_cancel=lambda: job.cancel,
-            on_progress=lambda p, m: _set_ai_progress(job, p, m),
+            on_progress=lambda p, m, v=vi, n=n_views:
+                _set_ai_progress(job, p, m, v, n),
             out_dir=out_dir,
         )
         result = provider.generate(req, snap["prefs_obj"], None)
@@ -849,6 +851,7 @@ def _run_pipeline(job, snap, bridge):
         # Screen mask (main thread image load) + accumulation (worker numpy)
         job.state = JobState.BUILD; job.stage = JobStage.MASK
         job.message = f"View {vi+1}/{n_views}: projecting mask…"
+        job.progress = _capture_view_progress(vi, n_views, 0.88)
         mask, conf, worn_rgb = bridge.run(lambda cp=clean_png, wp=worn_png:
                                            projection.extract_screen_mask(
                                                cp, wp, snap["render_resolution"],
@@ -897,6 +900,7 @@ def _run_pipeline(job, snap, bridge):
         # early-coverage check
         cov = float((count.reshape(res, res) > 0).sum()) / float(res * res)
         job.meta["coverage"] = cov
+        job.progress = _capture_view_progress(vi, n_views, 1.0)
 
     # cleanup cameras
     bridge.run(lambda: view_sampler.cleanup_views(
@@ -1388,10 +1392,29 @@ def _run_replay(job, snap, bridge):
     job.message = "Done (replay)."
 
 
-def _set_ai_progress(job, p, msg):
-    job.progress = 0.08 + 0.45 * p  # map provider 0..1 into the capture band
+_CAPTURE_PROGRESS_START = 0.08
+_CAPTURE_PROGRESS_END = 0.55
+
+
+def _capture_view_progress(view_index: int, view_count: int, local: float) -> float:
+    """Map one view's local progress into its non-overlapping global interval."""
+    count = max(1, int(view_count))
+    index = max(0, min(int(view_index), count - 1))
+    fraction = max(0.0, min(1.0, float(local)))
+    view_fraction = (index + fraction) / count
+    return (_CAPTURE_PROGRESS_START
+            + (_CAPTURE_PROGRESS_END - _CAPTURE_PROGRESS_START) * view_fraction)
+
+
+def _set_ai_progress(job, p, msg, view_index=0, view_count=1):
+    # AI providers report progress local to one request.  Put it inside the
+    # current view's slice instead of repeatedly mapping every view to the full
+    # capture band (which made the displayed percentage jump backwards).
+    local = 0.20 + 0.65 * max(0.0, min(1.0, float(p)))
+    mapped = _capture_view_progress(view_index, view_count, local)
+    job.progress = max(float(job.progress), mapped)
     if msg:
-        job.message = msg
+        job.message = f"View {view_index + 1}/{max(1, view_count)}: {msg}"
     job.touch()
 
 
@@ -1499,7 +1522,7 @@ def _tick(job, bridge):
     job_cache.clear_finished()
     bridge.pump()
     _console_log(job)
-    # live-refresh the viewport so the progress panel updates
+    # live-refresh the viewport so the Generate button progress overlay updates
     try:
         import bpy
         screen = bpy.context.screen

@@ -30,7 +30,7 @@ class AIWEAR_OT_run_pipeline(bpy.types.Operator):
             return {"CANCELLED"}
         try:
             pipeline.start_pipeline(context)
-            self.report({"INFO"}, "Pipeline started. See the panel for progress.")
+            self.report({"INFO"}, "Pipeline started. Progress is shown on Generate Wear.")
         except Exception as e:
             self.report({"ERROR"}, f"Failed to start: {e}")
             return {"CANCELLED"}
