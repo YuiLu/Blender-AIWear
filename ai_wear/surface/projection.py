@@ -134,6 +134,75 @@ def rasterize_screen_depth(verts_world: np.ndarray, tri_vert: np.ndarray,
     return depth_buf, coverage
 
 
+def rasterize_screen_depth_normals(verts_world: np.ndarray, tri_vert: np.ndarray,
+                                   view: np.ndarray, lens: float, sensor_w: float,
+                                   res_x: int, res_y: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Front-most depth plus flat geometric normal per screen pixel.
+
+    The normal buffer is only used as a reliability guard for edited-image
+    payloads.  Flat triangle normals are intentional here: a residual crossing
+    from a cap onto a side wall is unsafe even when the rendered material uses
+    smoothed normals.
+    """
+    ntri = tri_vert.shape[0]
+    vw = verts_world[tri_vert.reshape(-1)]
+    px, py, depth, in_front = project_points(view, vw, lens, sensor_w, res_x, res_y)
+    px = px.reshape(ntri, 3); py = py.reshape(ntri, 3)
+    depth = depth.reshape(ntri, 3); in_front = in_front.reshape(ntri, 3)
+
+    depth_buf = np.full((res_y, res_x), np.inf, dtype=np.float32)
+    normals = np.zeros((res_y, res_x, 3), dtype=np.float32)
+    coverage = np.zeros((res_y, res_x), dtype=bool)
+    eps = 1e-3
+    pix_eps = 1e-3
+
+    tri_pos = verts_world[tri_vert]
+    face_normals = np.cross(tri_pos[:, 1] - tri_pos[:, 0],
+                            tri_pos[:, 2] - tri_pos[:, 0])
+    face_normals /= (np.linalg.norm(face_normals, axis=1, keepdims=True) + 1e-12)
+
+    for t in range(ntri):
+        if not in_front[t].all():
+            continue
+        x0p, y0p = px[t, 0], py[t, 0]
+        x1p, y1p = px[t, 1], py[t, 1]
+        x2p, y2p = px[t, 2], py[t, 2]
+        area = _edge(x0p, y0p, x1p, y1p, x2p, y2p)
+        if abs(area) < 1e-8:
+            continue
+        xmin = max(0, int(min(x0p, x1p, x2p) - 1))
+        xmax = min(res_x - 1, int(max(x0p, x1p, x2p) + 1))
+        ymin = max(0, int(min(y0p, y1p, y2p) - 1))
+        ymax = min(res_y - 1, int(max(y0p, y1p, y2p) + 1))
+        if xmax < xmin or ymax < ymin:
+            continue
+        xs = np.arange(xmin, xmax + 1, dtype=np.int64) + 0.5
+        ys = np.arange(ymin, ymax + 1, dtype=np.int64) + 0.5
+        gx, gy = np.meshgrid(xs, ys)
+        PX = gx.ravel(); PY = gy.ravel()
+        w0 = _edge(x1p, y1p, x2p, y2p, PX, PY) / area
+        w1 = _edge(x2p, y2p, x0p, y0p, PX, PY) / area
+        w2 = 1.0 - w0 - w1
+        inside = (w0 >= -pix_eps) & (w1 >= -pix_eps) & (w2 >= -pix_eps)
+        if not inside.any():
+            continue
+        d = (w0 * depth[t, 0] + w1 * depth[t, 1] + w2 * depth[t, 2]).astype(np.float32)
+        d_2d = d.reshape(len(ys), len(xs))
+        inside_2d = inside.reshape(len(ys), len(xs))
+        sub_depth = depth_buf[ymin:ymax + 1, xmin:xmax + 1]
+        update = inside_2d & (d_2d < (sub_depth - eps))
+        if not update.any():
+            continue
+        sub_depth[update] = d_2d[update]
+        sub_normals = normals[ymin:ymax + 1, xmin:xmax + 1]
+        sub_normals[update] = face_normals[t]
+        coverage[ymin:ymax + 1, xmin:xmax + 1] |= update
+
+    depth_buf[~coverage] = 0.0
+    normals[~coverage] = 0.0
+    return depth_buf, coverage, normals
+
+
 # --- screen mask extraction -------------------------------------------------
 
 def _luminance(rgba: np.ndarray) -> np.ndarray:
@@ -196,15 +265,19 @@ def reject_depth_edge_payload(screen_mask: np.ndarray,
                               depth_buf: np.ndarray,
                               coverage: np.ndarray,
                               radius: float,
+                              normal_buf: Optional[np.ndarray] = None,
                               guard_pixels: Optional[int] = None,
+                              normal_guard_pixels: Optional[int] = None,
                               jump_fraction: float = 0.005) -> Tuple:
     """Neutralize unreliable image-edit differences at occlusion boundaries.
 
     Image-edit models can preserve the overall silhouette while moving a part
-    boundary by a few pixels.  At such pixels the clean-geometry Z buffer says
-    "rear surface", while the edited image contains the foreground part.  A
-    mathematically correct reprojection then stamps that foreground rim onto the
-    rear surface.  This is especially visible as long white arcs on dark parts.
+    boundary by a few pixels, or paint one face of a hard crease with a large
+    coherent change.  At such pixels the clean-geometry Z/normal buffer says
+    "surface A", while the edited image contains surface B.  A mathematically
+    correct reprojection then stamps that foreground/adjacent-face residual onto
+    the wrong surface.  This is especially visible as long white arcs or blocky
+    patches on dark round parts.
 
     We identify background silhouettes and sharp depth discontinuities in the
     clean geometry, dilate them by a small screen-space guard, and make the
@@ -222,20 +295,20 @@ def reject_depth_edge_payload(screen_mask: np.ndarray,
     jump = max(abs(float(radius)) * float(jump_fraction), 1e-5)
     depth_pad = np.pad(depth, 1, mode="edge")
     cover_pad = np.pad(covered, 1, mode="constant", constant_values=False)
-    edge = np.zeros_like(covered, dtype=bool)
+    depth_edge = np.zeros_like(covered, dtype=bool)
     for dy, dx in ((0, 1), (1, 0), (1, 2), (2, 1)):
         neighbour_depth = depth_pad[dy:dy + depth.shape[0],
                                     dx:dx + depth.shape[1]]
         neighbour_cover = cover_pad[dy:dy + depth.shape[0],
                                     dx:dx + depth.shape[1]]
-        edge |= covered & (
+        depth_edge |= covered & (
             ~neighbour_cover | (np.abs(depth - neighbour_depth) > jump))
 
     # About 0.6% of the render width: 3 px at 512, 6 px at 1024 and 12 px at
     # 2048. Image-edit boundary drift scales with image resolution.
     guard = (max(2, int(round(min(depth.shape) * 0.006)))
              if guard_pixels is None else max(0, int(guard_pixels)))
-    blocked = edge
+    blocked = depth_edge
     for _ in range(guard):
         pad = np.pad(blocked, 1, mode="constant", constant_values=False)
         blocked = np.zeros_like(blocked)
@@ -243,6 +316,31 @@ def reject_depth_edge_payload(screen_mask: np.ndarray,
             for dx in range(3):
                 blocked |= pad[dy:dy + depth.shape[0],
                                dx:dx + depth.shape[1]]
+
+    if normal_buf is not None and normal_buf.shape[:2] == covered.shape:
+        normals = np.asarray(normal_buf, dtype=np.float32)
+        norm_pad = np.pad(normals, ((1, 1), (1, 1), (0, 0)), mode="edge")
+        normal_edge = np.zeros_like(covered, dtype=bool)
+        for dy, dx in ((0, 1), (1, 0), (1, 2), (2, 1)):
+            neighbour_norm = norm_pad[dy:dy + depth.shape[0],
+                                      dx:dx + depth.shape[1]]
+            neighbour_cover = cover_pad[dy:dy + depth.shape[0],
+                                        dx:dx + depth.shape[1]]
+            dot = np.abs(np.sum(normals * neighbour_norm, axis=-1))
+            normal_edge |= covered & neighbour_cover & (dot < 0.85)
+        normal_guard = (
+            max(guard, int(round(min(depth.shape) * 0.024)))
+            if normal_guard_pixels is None
+            else max(0, int(normal_guard_pixels)))
+        normal_blocked = normal_edge
+        for _ in range(normal_guard):
+            pad = np.pad(normal_blocked, 1, mode="constant", constant_values=False)
+            normal_blocked = np.zeros_like(normal_blocked)
+            for dy in range(3):
+                for dx in range(3):
+                    normal_blocked |= pad[dy:dy + depth.shape[0],
+                                          dx:dx + depth.shape[1]]
+        blocked |= normal_blocked
     safe = covered & ~blocked
     mask[~safe] = 0.0
     if rgb.ndim == 3 and rgb.shape[:2] == covered.shape:
@@ -333,6 +431,28 @@ def accumulate_rgb_view(acc_rgb: np.ndarray, acc_rgb_w: np.ndarray,
     rgb = bilinear_sample_points(screen_rgb, px_s, py_s)  # (k, 3)
     np.add.at(acc_rgb, gidx, w[:, None] * rgb)
     np.add.at(acc_rgb_w, gidx, w)
+
+
+def accumulate_evidence_support(acc_support: np.ndarray,
+                                texel_pos: np.ndarray, texel_norm: np.ndarray,
+                                valid_idx: np.ndarray,
+                                view: np.ndarray, cam_loc: np.ndarray,
+                                lens: float, sensor_w: float,
+                                res_x: int, res_y: int,
+                                depth_buf: np.ndarray,
+                                screen_mask: np.ndarray,
+                                gamma: float, depth_eps: float,
+                                mask_threshold: float = 0.2,
+                                weight_threshold: float = 0.1) -> None:
+    """Count views that independently contain meaningful AI wear evidence."""
+    gidx, w, _vis, px_s, py_s = _select_facing(
+        texel_pos, texel_norm, valid_idx, view, cam_loc, lens, sensor_w,
+        res_x, res_y, depth_buf, depth_eps, gamma)
+    if gidx is None:
+        return
+    m = bilinear_sample_points(screen_mask, px_s, py_s)
+    supported = (m >= float(mask_threshold)) & (w >= float(weight_threshold))
+    np.add.at(acc_support, gidx, supported.astype(np.float32))
 
 
 def vertex_visibility(verts_world: np.ndarray, view: np.ndarray, cam_loc: np.ndarray,

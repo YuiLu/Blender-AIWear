@@ -533,6 +533,26 @@ production_only = "--production" in sys.argv
 tuning_only = "--tuning" in sys.argv
 latest_only = "--latest" in sys.argv
 view_isolation = "--view-isolation" in sys.argv
+depth_eps_frac = None
+normal_guard_pixels = None
+for arg in sys.argv:
+    if arg.startswith("--depth-eps-frac="):
+        depth_eps_frac = float(arg.split("=", 1)[1])
+    if arg.startswith("--normal-guard-pixels="):
+        normal_guard_pixels = int(arg.split("=", 1)[1])
+if depth_eps_frac is not None:
+    def _diagnostic_depth_eps(radius):
+        return max(float(radius) * depth_eps_frac, 1e-5)
+    pipeline._visibility_depth_epsilon = _diagnostic_depth_eps
+    summary["depth_eps_frac"] = depth_eps_frac
+if normal_guard_pixels is not None:
+    from ai_wear.surface import projection as _projection_module
+    _base_reject_depth_edge_payload = _projection_module.reject_depth_edge_payload
+    def _diagnostic_reject_payload(*args, **kwargs):
+        kwargs["normal_guard_pixels"] = normal_guard_pixels
+        return _base_reject_depth_edge_payload(*args, **kwargs)
+    _projection_module.reject_depth_edge_payload = _diagnostic_reject_payload
+    summary["normal_guard_pixels"] = normal_guard_pixels
 if review_only:
     arms = (
         ("01_raw", False, 8, False, 0, "current", 2.0),

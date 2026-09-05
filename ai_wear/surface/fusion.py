@@ -104,6 +104,29 @@ def prepare_worn_overlay(encoded_rgb: np.ndarray, ai_field: np.ndarray,
     return {"rgb": safe_rgb, "alpha": alpha}
 
 
+def evidence_consensus(support: np.ndarray, observed: np.ndarray,
+                       min_single_view: float = 0.35,
+                       smooth_iters: int = 2) -> np.ndarray:
+    """Softly attenuate AI evidence that only one view supports.
+
+    If a texel is visible in multiple views but only one edited image reports a
+    strong change, that change is more likely view-local relighting or semantic
+    drift than stable material wear.  We keep a small fraction instead of hard
+    zeroing it so real one-view scratches do not become rectangular holes.
+    """
+    sup = np.asarray(support, dtype=np.float32)
+    obs = np.asarray(observed, dtype=np.float32)
+    consensus = np.ones_like(sup, dtype=np.float32)
+    multi = obs >= 2.0
+    local = np.where(sup >= 2.0, 1.0,
+                     np.where(sup >= 1.0, float(min_single_view), 0.0))
+    consensus[multi] = local[multi]
+    for _ in range(max(0, int(smooth_iters))):
+        consensus = 0.5 * consensus + 0.5 * _local_mean(
+            consensus, np.ones_like(consensus, dtype=bool))
+    return np.clip(consensus, 0.0, 1.0).astype(np.float32)
+
+
 def _local_mean(field: np.ndarray, valid: np.ndarray) -> np.ndarray:
     pad = np.pad(np.where(valid, field, 0.0), 1)
     vpad = np.pad(valid.astype(np.float32), 1)
