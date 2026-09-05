@@ -700,7 +700,6 @@ def _run_pipeline(job, snap, bridge):
     # worn-texture accumulator (RGB projected to UV, same weighting as the mask)
     acc_rgb = np.zeros((res * res, 3), dtype=np.float32)
     acc_rgb_w = np.zeros(res * res, dtype=np.float32)
-    acc_support = np.zeros(res * res, dtype=np.float32)
     exposure_count = np.zeros(len(uvfield.vpos), dtype=np.float32)
 
     # 3. Cameras
@@ -782,7 +781,7 @@ def _run_pipeline(job, snap, bridge):
         lens = cam_data["lens"]
         sensor_w = cam_data["sensor_w"]
         rx = ry = snap["render_resolution"]
-        depth_buf, screen_coverage, screen_normals = projection.rasterize_screen_depth_normals(
+        depth_buf, screen_coverage = projection.rasterize_screen_depth(
             uvfield.vpos, uvfield.tri_vert, view, lens, sensor_w, rx, ry)
         inpaint_mask_png = None
         if (snap["provider"] == "COMFYUI" and snap.get("use_comfy_inpaint", True)
@@ -858,8 +857,7 @@ def _run_pipeline(job, snap, bridge):
                                                cp, wp, snap["render_resolution"],
                                                return_worn_rgb=True))
         mask, worn_rgb, screen_safe = projection.reject_depth_edge_payload(
-            mask, worn_rgb, depth_buf, screen_coverage, cam_data["radius"],
-            normal_buf=screen_normals)
+            mask, worn_rgb, depth_buf, screen_coverage, cam_data["radius"])
         # Save the exact interpolated diff mask consumed by projection next to
         # clean_Vi/worn_Vi.  It is RGB grayscale (not red-channel-only) so it is
         # immediately readable in ordinary image viewers and review tools.
@@ -901,10 +899,6 @@ def _run_pipeline(job, snap, bridge):
             acc_rgb, acc_rgb_w, texel_pos, texel_norm, valid_idx,
             view, cam_loc, lens, sensor_w, rx, ry, depth_buf, worn_rgb,
             snap["gamma"], depth_eps=depth_eps)
-        projection.accumulate_evidence_support(
-            acc_support, texel_pos, texel_norm, valid_idx,
-            view, cam_loc, lens, sensor_w, rx, ry, depth_buf, mask,
-            snap["gamma"], depth_eps=depth_eps)
 
         # exposure per vertex (worker numpy)
         exposure_count += projection.vertex_visibility(
@@ -944,15 +938,6 @@ def _run_pipeline(job, snap, bridge):
     fused = fusion.finalize_ai_field(acc_mask, acc_w, count)
     ai_field = fused["ai_field"]
     job.meta["coverage_ratio"] = fused["coverage_ratio"]
-    support = acc_support.reshape(res, res)
-    observed = count.reshape(res, res)
-    consensus = fusion.evidence_consensus(support, observed)
-    multi_observed = observed >= 2.0
-    nonzero_before_consensus = ai_field > 0.0
-    rejected_single_view = multi_observed & (support < 2.0) & nonzero_before_consensus
-    ai_field *= consensus
-    job.meta["single_view_evidence_rejected_ratio"] = float(
-        rejected_single_view.sum() / max(nonzero_before_consensus.sum(), 1))
     # Finalize the encoded color residual, then derive its alpha from actual AI
     # wear evidence (not camera coverage). Coverage is nearly 1 on a successful
     # run and using it as alpha would whiten the whole model at Amount=100.
@@ -961,8 +946,6 @@ def _run_pipeline(job, snap, bridge):
     overlay = fusion.prepare_worn_overlay(fused_rgb["rgb"], ai_field, rgb_valid)
     worn_uv = overlay["rgb"]                # (res,res,3), 0.5 = neutral residual
     wear_alpha = overlay["alpha"]           # (res,res), AI wear evidence
-    worn_uv = 0.5 + (worn_uv - 0.5) * consensus[..., None]
-    wear_alpha *= consensus
     job.meta["worn_coverage_ratio"] = fused_rgb["coverage_ratio"]
 
     # 5. Geometry priors
@@ -1230,7 +1213,6 @@ def _run_replay(job, snap, bridge):
     # worn-texture accumulator (RGB projected to UV, same weighting as the mask)
     acc_rgb = np.zeros((res * res, 3), dtype=np.float32)
     acc_rgb_w = np.zeros(res * res, dtype=np.float32)
-    acc_support = np.zeros(res * res, dtype=np.float32)
     exposure_count = np.zeros(len(uvfield.vpos), dtype=np.float32)
     n_views = len(view_records)
     job.meta["effective_view_count"] = n_views
@@ -1251,11 +1233,10 @@ def _run_replay(job, snap, bridge):
         lens = float(rec["lens"]); sensor_w = float(rec["sensor_w"])
         radius = float(rec["radius"])
         rx = ry = res
-        depth_buf, screen_coverage, screen_normals = projection.rasterize_screen_depth_normals(
+        depth_buf, screen_coverage = projection.rasterize_screen_depth(
             uvfield.vpos, uvfield.tri_vert, view, lens, sensor_w, rx, ry)
         mask, worn_rgb, screen_safe = projection.reject_depth_edge_payload(
-            mask, worn_rgb, depth_buf, screen_coverage, radius,
-            normal_buf=screen_normals)
+            mask, worn_rgb, depth_buf, screen_coverage, radius)
         rec["depth_edge_rejected_ratio"] = float(
             1.0 - screen_safe.sum() / max(screen_coverage.sum(), 1))
         # The persisted mask is the exact guarded payload consumed below.
@@ -1268,10 +1249,6 @@ def _run_replay(job, snap, bridge):
         projection.accumulate_rgb_view(
             acc_rgb, acc_rgb_w, texel_pos, texel_norm, valid_idx,
             view, cam_loc, lens, sensor_w, rx, ry, depth_buf, worn_rgb,
-            snap["gamma"], depth_eps=depth_eps)
-        projection.accumulate_evidence_support(
-            acc_support, texel_pos, texel_norm, valid_idx,
-            view, cam_loc, lens, sensor_w, rx, ry, depth_buf, mask,
             snap["gamma"], depth_eps=depth_eps)
         exposure_count += projection.vertex_visibility(
             uvfield.vpos, view, cam_loc, lens, sensor_w, rx, ry,
@@ -1293,15 +1270,6 @@ def _run_replay(job, snap, bridge):
     fused = fusion.finalize_ai_field(acc_mask, acc_w, count)
     ai_field = fused["ai_field"]
     job.meta["coverage_ratio"] = fused["coverage_ratio"]
-    support = acc_support.reshape(res, res)
-    observed = count.reshape(res, res)
-    consensus = fusion.evidence_consensus(support, observed)
-    multi_observed = observed >= 2.0
-    nonzero_before_consensus = ai_field > 0.0
-    rejected_single_view = multi_observed & (support < 2.0) & nonzero_before_consensus
-    ai_field *= consensus
-    job.meta["single_view_evidence_rejected_ratio"] = float(
-        rejected_single_view.sum() / max(nonzero_before_consensus.sum(), 1))
     # Finalize the encoded color residual and build an AI-evidence alpha.  View
     # coverage is deliberately not used as the material mask.
     fused_rgb = fusion.finalize_rgb_field(acc_rgb, acc_rgb_w)
@@ -1309,8 +1277,6 @@ def _run_replay(job, snap, bridge):
     overlay = fusion.prepare_worn_overlay(fused_rgb["rgb"], ai_field, rgb_valid)
     worn_uv = overlay["rgb"]                # (res,res,3), 0.5 = neutral residual
     wear_alpha = overlay["alpha"]           # (res,res), AI wear evidence
-    worn_uv = 0.5 + (worn_uv - 0.5) * consensus[..., None]
-    wear_alpha *= consensus
     job.meta["worn_coverage_ratio"] = fused_rgb["coverage_ratio"]
 
     # Geometry priors

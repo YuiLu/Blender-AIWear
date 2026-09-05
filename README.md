@@ -492,16 +492,10 @@ footprint 会混入尚未填充的岛外像素；随后又把两侧完整的 8 t
 的椭圆印记。
 
 管线现在从 clean 几何深度图检测背景轮廓和深度突变，在其两侧建立约为图像宽度 `0.6%` 的保护
-带；同时从 clean 几何的屏幕空间 flat normal 检测折角边界，并用更宽的保护带拒绝跨面的 AI
-payload。保护带内 mask 归零、带符号 RGB residual 回到中性 `0.5`；平滑曲面内部保持不变，磨损
-是否靠近凸边仍由对象空间 Geometry Prior 决定。相同缓存下，底座外观跨缝 p95 从 `0.146` 降到
-`0.042`，白弧消失。
-
-进一步的逐视角 Replay 显示，V5 这类端盖视角会把“底面整片掉漆”的语义变化带到圆柱侧壁，V2
-也可能产生只有一张图支持的大块局部灰斑。最新版在 UV 融合后增加软多视角证据一致性：同一
-texel 如果被多张视图看到，但只有一张视图报告强磨损，就只保留一小部分残差并做局部平滑；确实
-只被一张视图看到的区域不会被强行抹掉。这个步骤解决的是 AI 编辑的 occlusion/crease-boundary
-leakage 和 single-view semantic drift，不应与 Seam Fusion 或 Island Padding 混为一类。
+带。保护带内 mask 归零、带符号 RGB residual 回到中性 `0.5`；平滑曲面内部保持不变，磨损是否
+靠近凸边仍由对象空间 Geometry Prior 决定。相同缓存下，底座外观跨缝 p95 从 `0.146` 降到
+`0.042`，白弧消失。这个步骤解决的是 AI 编辑的 occlusion-boundary leakage，不应与 Seam Fusion
+或 Island Padding 混为一类。
 
 ## 11. Shader 如何应用 AI 磨损
 
