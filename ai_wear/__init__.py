@@ -1,7 +1,7 @@
 """AI Wear Texture — Blender addon.
 
 Pipeline: Mesh Preflight / UV QC → Mode A/B → multi-view clean render →
-AI provider (OpenAI / Gemini / ComfyUI / fully-configurable Custom HTTP) →
+AI provider (OpenAI / Gemini / Qwen Image / ComfyUI / Custom HTTP) →
 screen-mask extraction → 3D Surface Field multi-view fusion → topology-growth
 WearThreshold → UV seam fusion + dilation → 16-bit WearThreshold + real-time shader
 preview + export.
@@ -16,7 +16,7 @@ See README.md for install / config / workflow mapping.
 bl_info = {
     "name": "AI Wear Texture",
     "author": "AI Wear Texture — implementation per plan",
-    "version": (0, 3, 6),
+    "version": (0, 3, 7),
     "blender": (3, 6, 0),
     "location": "View3D > Sidebar (N) > AI Wear",
     "description": "AI-driven model wear-texture generation: UV QC, surface field, "

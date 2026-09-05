@@ -25,6 +25,7 @@ from bpy.types import AddonPreferences
 # base URL / model / key are data, so a new endpoint never needs a code change.
 PROVIDER_OPENAI = "OPENAI"
 PROVIDER_GEMINI = "GEMINI"
+PROVIDER_QWEN = "QWEN"
 PROVIDER_COMFYUI = "COMFYUI"
 PROVIDER_CUSTOM = "CUSTOM"
 
@@ -39,17 +40,19 @@ class AIWearPreferences(AddonPreferences):
         items=(
             (PROVIDER_OPENAI, "OpenAI (GPT-Image)", "OpenAI image-edit compatible endpoint"),
             (PROVIDER_GEMINI, "Gemini", "Google Gemini image generation/edit"),
+            (PROVIDER_QWEN, "Qwen Image (DashScope)",
+             "Qwen Image 3.0 through Alibaba Cloud Model Studio native API"),
             (PROVIDER_COMFYUI, "ComfyUI", "Local ComfyUI workflow server"),
             (PROVIDER_CUSTOM, "Custom HTTP", "Fully configurable OpenAI-compatible or raw HTTP endpoint"),
         ),
         default=PROVIDER_CUSTOM,
     )
 
-    # --- OpenAI / Gemini / Custom shared fields ----------------------------
+    # --- OpenAI / Gemini / Qwen / Custom shared fields ---------------------
     api_base_url: StringProperty(
         name="API Base URL",
-        description="Base URL of the image-generation endpoint, e.g. https://api.openai.com/v1. "
-                    "For Custom HTTP this is the request root; the full path is appended",
+        description="Base URL of the image-generation endpoint. For Qwen use the Model "
+                    "Studio workspace root (the provider derives the native API path)",
         default="https://api.openai.com/v1",
         subtype="NONE",
     )
@@ -61,7 +64,8 @@ class AIWearPreferences(AddonPreferences):
     )
     model_id: StringProperty(
         name="Model ID",
-        description="Provider model identifier, e.g. gpt-image-2 or gemini-2.5-flash-image",
+        description="Provider model identifier, e.g. gpt-image-2, gemini-2.5-flash-image, "
+                    "or qwen-image-3.0",
         default="gpt-image-2",
     )
 
@@ -188,6 +192,12 @@ class AIWearPreferences(AddonPreferences):
         box.prop(self, "api_base_url")
         box.prop(self, "api_key")
         box.prop(self, "model_id")
+
+        if self.provider == PROVIDER_QWEN:
+            qbox = layout.box()
+            qbox.label(text="Uses the native DashScope multimodal API", icon="INFO")
+            qbox.label(text="Do not use /compatible-mode/v1 (it is removed automatically).")
+            qbox.label(text="Base URL, API key, and model must belong to the same region.")
 
         if self.provider == PROVIDER_CUSTOM:
             box2 = layout.box()

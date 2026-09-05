@@ -144,6 +144,7 @@ class AIWearSceneSettings(PropertyGroup):
         description="NONE = use the AddonPreferences default",
         items=(("NONE", "— Default —", "Use AddonPreferences provider"),
                ("OPENAI", "OpenAI", ""), ("GEMINI", "Gemini", ""),
+               ("QWEN", "Qwen Image", "Alibaba Cloud Model Studio native API"),
                ("COMFYUI", "ComfyUI", ""), ("CUSTOM", "Custom HTTP", "")),
         default="NONE",
     )

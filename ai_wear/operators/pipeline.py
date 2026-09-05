@@ -118,6 +118,13 @@ def snapshot_context(context) -> dict:
     preset_name = ""
     if 0 <= s.active_preset_index < len(s.presets):
         preset_name = s.presets[s.active_preset_index].name
+    prefs_snap = PrefsSnap(prefs)
+    # Providers consume this plain object on the worker thread.  Apply the
+    # scene-level overrides to it as well as recording them in metadata;
+    # otherwise the UI appeared to override Base URL / Model but requests still
+    # used the global Add-on Preferences values.
+    prefs_snap.api_base_url = s.effective_base_url(prefs)
+    prefs_snap.model_id = s.effective_model(prefs)
     return {
         "object_name": obj.name if obj else None,
         "obj_uuid": obj_uuid,
@@ -159,7 +166,7 @@ def snapshot_context(context) -> dict:
         "export_format": s.export_format,
         "wear_amount": s.wear_amount,
         "feather": s.feather,
-        "prefs_obj": PrefsSnap(prefs),  # plain snapshot; safe on worker thread
+        "prefs_obj": prefs_snap,  # plain snapshot; safe on worker thread
         "timeout": prefs.timeout,
         "poll_interval": prefs.poll_interval,
     }

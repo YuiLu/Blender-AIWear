@@ -1,7 +1,7 @@
 【效果展示 Wear Amount 30/60/100】
 
 # 快速上手
-<font style="color:rgb(51, 51, 51);">要求 Blender 3.6+；运行期只使用 Blender 自带的 </font>`<font style="color:rgb(0, 0, 0);background-color:rgb(240, 240, 240);">bpy</font>`<font style="color:rgb(51, 51, 51);">和 Python 标准库，不需要额外环境依赖。插件支持配置自定义api端点和key以访问OpenAI、Gemini等模型、或者本地/云端部署的ComfyUI进行生图</font>
+<font style="color:rgb(51, 51, 51);">要求 Blender 3.6+；运行期只使用 Blender 自带的 </font>`<font style="color:rgb(0, 0, 0);background-color:rgb(240, 240, 240);">bpy</font>`<font style="color:rgb(51, 51, 51);">和 Python 标准库，不需要额外环境依赖。插件支持配置端点和 key 以访问 OpenAI、Gemini、Qwen Image 等模型，或者本地/云端部署的 ComfyUI 进行生图。Qwen Image 3.0 需要选择专用的 DashScope Provider，使用百炼原生多模态接口，而不是 OpenAI compatible 图片编辑接口</font>
 
 1. 正确安装插件（从zip安装）
 2. <font style="color:rgb(51, 51, 51);">在 </font>`<font style="color:rgb(0, 0, 0);background-color:rgb(240, 240, 240);">Edit > Preferences > Add-ons > AI Wear Texture</font>`<font style="color:rgb(51, 51, 51);"> 中配置 Provider</font>

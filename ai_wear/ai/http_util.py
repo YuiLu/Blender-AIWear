@@ -72,6 +72,15 @@ def _content_encoding(resp) -> Optional[str]:
 
 def _request(url: str, data: bytes, headers: Dict[str, str], timeout: float,
              method: str = "POST") -> Tuple[int, bytes]:
+    # urllib may collapse a copied full-width comma or other non-ASCII URL
+    # character into the opaque ``URLError: [Errno 0] Error`` on Windows.
+    # Reject it before opening a socket so the configuration error is obvious.
+    try:
+        url.encode("ascii")
+    except UnicodeEncodeError:
+        raise NetworkError(
+            "Endpoint URL contains non-ASCII characters. Remove copied Chinese "
+            "punctuation such as the trailing '，'.", kind="CONFIG")
     # Advertise only the encodings we can decode (gzip/deflate). This steers
     # servers/gateways away from brotli, which stdlib can't decompress.
     h = dict(headers)

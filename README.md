@@ -38,8 +38,15 @@ WearThreshold / WornTex / Shader
 6. 完成后直接拖动 `Wear Amount` / `Feather`；不会重新请求 AI。
 7. 只修改几何先验、拓扑、seam 或生长参数时，用 `Replay Downstream` 复用上次 AI 图。
 
-Provider 支持 OpenAI、Gemini、ComfyUI，以及 OpenAI-compatible / Raw JSON 自定义端点。
+Provider 支持 OpenAI、Gemini、Qwen Image 3.0、ComfyUI，以及 OpenAI-compatible / Raw JSON 自定义端点。
 API key 保存在 Add-on Preferences，不写入 `.blend`；也可以通过环境变量提供。
+
+使用阿里云百炼的 `qwen-image-3.0` / `qwen-image-3.0-pro` 时，应选择
+`Qwen Image (DashScope)`，Model 填对应模型名，Base URL 填工作空间根地址，例如
+`https://<WorkspaceId>.cn-beijing.maas.aliyuncs.com`。Qwen Image 不走
+`/compatible-mode/v1/images/edits`；插件会调用原生同步多模态端点，并能把 clean 与 Anchor/Previous
+参考图一并发送。为了兼容旧配置，Base URL 尾部的 `/compatible-mode/v1` 和复制时带入的全角逗号会
+自动移除。Base URL、API key 和模型必须属于同一区域。
 
 ## 2. UV 与网格的对应关系
 
@@ -116,7 +123,7 @@ Fibonacci 点不会恰好落在正方体顶点，但同样都是斜向视角，�
 存在 context 时，插件会额外明确告诉模型：第一张图是必须保持构图的当前 clean target，
 第二张只是磨损材质、颜色、划痕尺度和严重程度的风格参考，不能复制它的相机与几何。
 
-该输入只在 Provider 声明支持参考图时生效，目前内置实现中是 Gemini。ComfyUI 的可移植
+该输入只在 Provider 声明支持参考图时生效，目前内置实现中是 Gemini 与 Qwen Image。ComfyUI 的可移植
 原生 inpaint 图不带 IP-Adapter，因此不伪装成支持跨图 context。每个视角实际使用的
 `context_source` 会写入 `views.json`，实验时可以检查，而不是只相信 UI 开关。
 

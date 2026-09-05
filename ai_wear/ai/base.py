@@ -103,10 +103,12 @@ def _register_builtin():
     from .openai_provider import OpenAIProvider
     from .gemini_provider import GeminiProvider
     from .comfyui_provider import ComfyUIProvider
+    from .qwen_image_provider import QwenImageProvider
     from .custom_http_provider import CustomHTTPProvider
 
     register_provider("OPENAI", OpenAIProvider)
     register_provider("GEMINI", GeminiProvider)
+    register_provider("QWEN", QwenImageProvider)
     register_provider("COMFYUI", ComfyUIProvider)
     register_provider("CUSTOM", CustomHTTPProvider)
 
